@@ -6,6 +6,7 @@ Contributors:
 -
 -
 
+
 The goal of this project is to develop a purely vision-based system that automatically transcribes a silent top-down video of a piano performance into a MIDI file. Unlike traditional music transcription methods that rely on audio signals, this project uses only visual information extracted from video frames to detect which piano keys are pressed and when, and then converts this information into symbolic musical notation.
 
 - Methodology
