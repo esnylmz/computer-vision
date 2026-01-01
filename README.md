@@ -16,3 +16,16 @@ The goal of this project is to develop a purely vision-based system that automat
   For each video frame, motion and appearance changes inside each key region are analyzed using classical computer vision techniques such as frame differencing and intensity thresholding to identify key press events. Optionally, a lightweight CNN classifier may be trained to determine the pressed/unpressed state of each key for increased robustness.
 
   Detected key activation sequences are converted to note onset and offset times based on the video frame rate, and corresponding MIDI events are generated to construct a MIDI file representing the performance.
+
+
+  ## First Try-Outs
+  - Mapping the Centers of the Black Keys in the 1st Frame
+  
+  
+![black_key_centers](https://github.com/user-attachments/assets/53f68529-ab45-4611-bb79-de3bf9052ae3)
+
+
+- From the black key centers, white keys are detected and the notes are mapped
+
+![note-division](https://github.com/user-attachments/assets/149d04a1-aace-4dc3-83fb-ba8af7490d96)
+
