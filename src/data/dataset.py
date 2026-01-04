@@ -49,12 +49,12 @@ class PianoVAMDataset:
     PianoVAM Dataset wrapper for piano fingering detection.
     
     Attributes:
-        split: One of 'train', 'valid' (or 'validation'), 'test'
+        split: One of 'train', 'validation' (or 'valid'/'val'), 'test'
         cache_dir: Directory to cache downloaded files
     
     Note:
-        The dataset uses 'valid' for the validation split. The loader automatically
-        maps 'validation' and 'val' to 'valid' for convenience.
+        The dataset uses 'validation' for the validation split. The loader automatically
+        maps 'valid' and 'val' to 'validation' for convenience.
     """
     
     DATASET_NAME = "PianoVAM/PianoVAM_v1.0"
@@ -73,7 +73,7 @@ class PianoVAMDataset:
         Initialize PianoVAM dataset.
         
         Args:
-            split: Dataset split ('train', 'valid'/'validation', 'test')
+            split: Dataset split ('train', 'validation'/'valid'/'val', 'test')
             cache_dir: Directory to cache downloaded files
             streaming: If True, stream data without downloading full dataset
             timeout: Request timeout in seconds (default: 120)
@@ -81,7 +81,7 @@ class PianoVAMDataset:
             max_samples: Maximum number of samples to load (None = all). Useful for exploration.
         
         Note:
-            'validation' and 'val' are automatically mapped to 'valid'.
+            'valid' and 'val' are automatically mapped to 'validation'.
         """
         self.split = split
         self.cache_dir = Path(cache_dir)
@@ -122,12 +122,13 @@ class PianoVAMDataset:
     def _normalize_split_name(self, split: str) -> str:
         """Normalize split name to match dataset conventions."""
         # Map common variations to standard names
-        # According to HuggingFace, the dataset uses 'valid' not 'validation'
+        # According to HuggingFace dataset page, splits are: 'train', 'validation', 'test'
         split_map = {
-            'validation': 'valid',
-            'val': 'valid',
+            'valid': 'validation',  # Map 'valid' to 'validation'
+            'val': 'validation',    # Map 'val' to 'validation'
             'train': 'train',
-            'test': 'test'
+            'test': 'test',
+            'validation': 'validation'  # Keep as-is
         }
         return split_map.get(split.lower(), split.lower())
     
@@ -150,11 +151,10 @@ class PianoVAMDataset:
                 else:
                     print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
                 
-                # For streaming mode, try loading full dataset first to see all splits
-                # This helps when the dataset structure requires it
+                # For streaming mode, try direct split loading
                 if streaming:
+                    # Try normalized name first (e.g., 'validation')
                     try:
-                        # Try direct split loading first
                         dataset = load_dataset(
                             self.DATASET_NAME,
                             split=normalized_split,
@@ -163,27 +163,24 @@ class PianoVAMDataset:
                         )
                         return dataset
                     except ValueError as split_error:
-                        # If split not found, try loading full dataset first
-                        if 'Bad split' in str(split_error):
-                            print(f"Split '{normalized_split}' not found directly. Loading full dataset to check available splits...")
-                            full_dataset = load_dataset(
-                                self.DATASET_NAME,
-                                streaming=True,
-                                download_config=download_config
-                            )
-                            # If it's a dict (DatasetDict), get the split
-                            if isinstance(full_dataset, dict):
-                                if normalized_split in full_dataset:
-                                    return full_dataset[normalized_split]
-                                else:
-                                    available = list(full_dataset.keys())
-                                    raise ValueError(
-                                        f"Split '{split}' (mapped to '{normalized_split}') not found. "
-                                        f"Available splits: {available}."
-                                    )
-                            else:
-                                # Single dataset, might be the train split
-                                raise split_error
+                        # If normalized name fails, try original name
+                        if 'Bad split' in str(split_error) and normalized_split != split.lower():
+                            print(f"Split '{normalized_split}' not found. Trying original name '{split}'...")
+                            try:
+                                dataset = load_dataset(
+                                    self.DATASET_NAME,
+                                    split=split,
+                                    streaming=True,
+                                    download_config=download_config
+                                )
+                                return dataset
+                            except ValueError:
+                                # Both failed, raise with helpful message
+                                raise ValueError(
+                                    f"Split '{split}' (tried as '{normalized_split}') not found. "
+                                    f"Common splits for this dataset: 'train', 'validation', 'test'. "
+                                    f"Note: 'valid' and 'val' map to 'validation'."
+                                )
                         else:
                             raise
                 else:
@@ -211,7 +208,7 @@ class PianoVAMDataset:
                             raise ValueError(
                                 f"Split '{split}' (mapped to '{normalized_split}') not found. "
                                 f"Available splits: {available}. "
-                                f"Note: Use 'valid' instead of 'validation'."
+                                f"Note: Use 'validation' (or 'valid'/'val' which map to 'validation')."
                             )
                     except Exception as inner_e:
                         if 'Bad split' not in str(inner_e):
@@ -262,7 +259,7 @@ class PianoVAMDataset:
             f"2. Check your internet connection\n"
             f"3. Try increasing timeout (current: {self.timeout}s)\n"
             f"4. Set HF_TOKEN in Colab secrets for better rate limits\n"
-            f"5. Use 'valid' instead of 'validation' for the validation split"
+            f"5. Use 'validation' (or 'valid'/'val') for the validation split"
         )
         
     def __len__(self) -> int:
