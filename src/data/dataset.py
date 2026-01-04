@@ -66,7 +66,8 @@ class PianoVAMDataset:
         cache_dir: str = './data/cache',
         streaming: bool = True,
         timeout: int = 120,
-        max_retries: int = 5
+        max_retries: int = 5,
+        max_samples: Optional[int] = None
     ):
         """
         Initialize PianoVAM dataset.
@@ -77,6 +78,7 @@ class PianoVAMDataset:
             streaming: If True, stream data without downloading full dataset
             timeout: Request timeout in seconds (default: 120)
             max_retries: Maximum number of retries for network errors (default: 5)
+            max_samples: Maximum number of samples to load (None = all). Useful for exploration.
         
         Note:
             'validation' and 'val' are automatically mapped to 'valid'.
@@ -87,6 +89,7 @@ class PianoVAMDataset:
         self.streaming = streaming
         self.timeout = timeout
         self.max_retries = max_retries
+        self.max_samples = max_samples
         
         # Load dataset metadata from HuggingFace
         if load_dataset is None:
@@ -110,6 +113,8 @@ class PianoVAMDataset:
         # Convert to list if not streaming for indexing
         if not streaming:
             self._samples = list(self.hf_dataset)
+            if self.max_samples is not None:
+                self._samples = self._samples[:self.max_samples]
         else:
             self._samples = None
             self._iterator = None
@@ -145,14 +150,51 @@ class PianoVAMDataset:
                 else:
                     print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
                 
-                # Load dataset - removed trust_remote_code as it's deprecated
-                dataset = load_dataset(
-                    self.DATASET_NAME,
-                    split=normalized_split,
-                    streaming=streaming,
-                    download_config=download_config
-                )
-                return dataset
+                # For streaming mode, try loading full dataset first to see all splits
+                # This helps when the dataset structure requires it
+                if streaming:
+                    try:
+                        # Try direct split loading first
+                        dataset = load_dataset(
+                            self.DATASET_NAME,
+                            split=normalized_split,
+                            streaming=True,
+                            download_config=download_config
+                        )
+                        return dataset
+                    except ValueError as split_error:
+                        # If split not found, try loading full dataset first
+                        if 'Bad split' in str(split_error):
+                            print(f"Split '{normalized_split}' not found directly. Loading full dataset to check available splits...")
+                            full_dataset = load_dataset(
+                                self.DATASET_NAME,
+                                streaming=True,
+                                download_config=download_config
+                            )
+                            # If it's a dict (DatasetDict), get the split
+                            if isinstance(full_dataset, dict):
+                                if normalized_split in full_dataset:
+                                    return full_dataset[normalized_split]
+                                else:
+                                    available = list(full_dataset.keys())
+                                    raise ValueError(
+                                        f"Split '{split}' (mapped to '{normalized_split}') not found. "
+                                        f"Available splits: {available}."
+                                    )
+                            else:
+                                # Single dataset, might be the train split
+                                raise split_error
+                        else:
+                            raise
+                else:
+                    # Non-streaming: load directly
+                    dataset = load_dataset(
+                        self.DATASET_NAME,
+                        split=normalized_split,
+                        streaming=False,
+                        download_config=download_config
+                    )
+                    return dataset
             except ValueError as e:
                 # Check if it's a split name error
                 error_str = str(e)
@@ -182,13 +224,30 @@ class PianoVAMDataset:
             except Exception as e:
                 last_error = e
                 error_name = type(e).__name__
-                if 'Timeout' in error_name or 'timeout' in str(e).lower():
+                error_str = str(e).lower()
+                
+                # Check for HTTP errors (502, 503, 504, etc.)
+                is_http_error = (
+                    'HTTPError' in error_name or 
+                    'HfHubHTTPError' in error_name or
+                    '502' in error_str or 
+                    '503' in error_str or 
+                    '504' in error_str or
+                    'bad gateway' in error_str or
+                    'service unavailable' in error_str or
+                    'gateway timeout' in error_str
+                )
+                
+                if 'Timeout' in error_name or 'timeout' in error_str:
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
                     print(f"Timeout error. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
-                elif 'Connection' in error_name or 'connection' in str(e).lower():
+                elif is_http_error or 'Connection' in error_name or 'connection' in error_str:
                     wait_time = 2 ** attempt
-                    print(f"Connection error. Retrying in {wait_time}s...")
+                    if is_http_error:
+                        print(f"HTTP error (likely temporary server issue). Retrying in {wait_time}s...")
+                    else:
+                        print(f"Connection error. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     # For non-network errors, raise immediately
@@ -224,8 +283,12 @@ class PianoVAMDataset:
             for row in self._samples:
                 yield self._row_to_sample(row)
         else:
+            count = 0
             for row in self.hf_dataset:
                 yield self._row_to_sample(row)
+                count += 1
+                if self.max_samples is not None and count >= self.max_samples:
+                    break
     
     def _row_to_sample(self, row: Dict) -> PianoVAMSample:
         """Convert a dataset row to PianoVAMSample."""
@@ -362,7 +425,8 @@ class PianoVAMDataset:
 def load_pianovam(
     split: str = 'train',
     cache_dir: str = './data/cache',
-    streaming: bool = False
+    streaming: bool = False,
+    max_samples: Optional[int] = None
 ) -> PianoVAMDataset:
     """
     Convenience function to load PianoVAM dataset.
@@ -371,9 +435,15 @@ def load_pianovam(
         split: Dataset split
         cache_dir: Cache directory
         streaming: Whether to stream data
+        max_samples: Maximum number of samples to load (None = all)
         
     Returns:
         PianoVAMDataset instance
     """
-    return PianoVAMDataset(split=split, cache_dir=cache_dir, streaming=streaming)
+    return PianoVAMDataset(
+        split=split, 
+        cache_dir=cache_dir, 
+        streaming=streaming,
+        max_samples=max_samples
+    )
 
