@@ -49,8 +49,12 @@ class PianoVAMDataset:
     PianoVAM Dataset wrapper for piano fingering detection.
     
     Attributes:
-        split: One of 'train', 'validation', 'test'
+        split: One of 'train', 'valid' (or 'validation'), 'test'
         cache_dir: Directory to cache downloaded files
+    
+    Note:
+        The dataset uses 'valid' for the validation split. The loader automatically
+        maps 'validation' and 'val' to 'valid' for convenience.
     """
     
     DATASET_NAME = "PianoVAM/PianoVAM_v1.0"
@@ -68,11 +72,14 @@ class PianoVAMDataset:
         Initialize PianoVAM dataset.
         
         Args:
-            split: Dataset split ('train', 'validation', 'test')
+            split: Dataset split ('train', 'valid'/'validation', 'test')
             cache_dir: Directory to cache downloaded files
             streaming: If True, stream data without downloading full dataset
             timeout: Request timeout in seconds (default: 120)
             max_retries: Maximum number of retries for network errors (default: 5)
+        
+        Note:
+            'validation' and 'val' are automatically mapped to 'valid'.
         """
         self.split = split
         self.cache_dir = Path(cache_dir)
@@ -107,6 +114,18 @@ class PianoVAMDataset:
             self._samples = None
             self._iterator = None
     
+    def _normalize_split_name(self, split: str) -> str:
+        """Normalize split name to match dataset conventions."""
+        # Map common variations to standard names
+        # According to HuggingFace, the dataset uses 'valid' not 'validation'
+        split_map = {
+            'validation': 'valid',
+            'val': 'valid',
+            'train': 'train',
+            'test': 'test'
+        }
+        return split_map.get(split.lower(), split.lower())
+    
     def _load_with_retry(
         self, 
         split: str, 
@@ -114,29 +133,62 @@ class PianoVAMDataset:
         download_config: Optional[Any]
     ):
         """Load dataset with retry logic for handling timeouts."""
+        # Normalize split name (validation -> valid)
+        normalized_split = self._normalize_split_name(split)
+        
         last_error = None
         
         for attempt in range(self.max_retries):
             try:
-                print(f"Loading dataset (attempt {attempt + 1}/{self.max_retries})...")
+                if attempt == 0:
+                    print(f"Loading dataset split '{normalized_split}' (attempt {attempt + 1}/{self.max_retries})...")
+                else:
+                    print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
+                
+                # Load dataset - removed trust_remote_code as it's deprecated
                 dataset = load_dataset(
                     self.DATASET_NAME,
-                    split=split,
+                    split=normalized_split,
                     streaming=streaming,
-                    download_config=download_config,
-                    trust_remote_code=True
+                    download_config=download_config
                 )
                 return dataset
+            except ValueError as e:
+                # Check if it's a split name error
+                error_str = str(e)
+                if 'Bad split' in error_str or 'split' in error_str.lower():
+                    # Try to get available splits
+                    try:
+                        full_dataset = load_dataset(
+                            self.DATASET_NAME,
+                            download_config=download_config,
+                            download_mode="reuse_dataset_if_exists"
+                        )
+                        if isinstance(full_dataset, dict):
+                            available = list(full_dataset.keys())
+                            raise ValueError(
+                                f"Split '{split}' (mapped to '{normalized_split}') not found. "
+                                f"Available splits: {available}. "
+                                f"Note: Use 'valid' instead of 'validation'."
+                            )
+                    except Exception as inner_e:
+                        if 'Bad split' not in str(inner_e):
+                            # Re-raise original error if inner call fails for different reason
+                            raise e
+                    raise
+                else:
+                    # For other ValueError, raise immediately
+                    raise
             except Exception as e:
                 last_error = e
                 error_name = type(e).__name__
                 if 'Timeout' in error_name or 'timeout' in str(e).lower():
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
-                    print(f"Timeout error on attempt {attempt + 1}. Retrying in {wait_time}s...")
+                    print(f"Timeout error. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 elif 'Connection' in error_name or 'connection' in str(e).lower():
                     wait_time = 2 ** attempt
-                    print(f"Connection error on attempt {attempt + 1}. Retrying in {wait_time}s...")
+                    print(f"Connection error. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     # For non-network errors, raise immediately
@@ -150,7 +202,8 @@ class PianoVAMDataset:
             f"1. Try using streaming=True to avoid downloading all files at once\n"
             f"2. Check your internet connection\n"
             f"3. Try increasing timeout (current: {self.timeout}s)\n"
-            f"4. Set HF_TOKEN in Colab secrets for better rate limits"
+            f"4. Set HF_TOKEN in Colab secrets for better rate limits\n"
+            f"5. Use 'valid' instead of 'validation' for the validation split"
         )
         
     def __len__(self) -> int:
