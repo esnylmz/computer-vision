@@ -119,18 +119,39 @@ class PianoVAMDataset:
             self._samples = None
             self._iterator = None
     
+    # Valid HuggingFace API split names for this dataset
+    VALID_SPLITS = {'train', 'validation', 'test'}
+    
     def _normalize_split_name(self, split: str) -> str:
-        """Normalize split name to match dataset conventions."""
-        # Map common variations to standard names
-        # According to HuggingFace dataset page, splits are: 'train', 'validation', 'test'
+        """
+        Normalize split name to match HuggingFace API conventions.
+        
+        IMPORTANT: The HuggingFace API split names are: 'train', 'validation', 'test'
+        But the 'split' COLUMN inside the data has different values: 'train', 'valid', 'test'
+        
+        This function normalizes user input to HuggingFace API split names.
+        """
+        split_lower = split.lower().strip()
+        
+        # Map common variations to HuggingFace API split names
         split_map = {
-            'valid': 'validation',  # Map 'valid' to 'validation'
-            'val': 'validation',    # Map 'val' to 'validation'
+            'valid': 'validation',     # User says 'valid' -> API uses 'validation'
+            'val': 'validation',       # User says 'val' -> API uses 'validation'
             'train': 'train',
             'test': 'test',
-            'validation': 'validation'  # Keep as-is
+            'validation': 'validation'
         }
-        return split_map.get(split.lower(), split.lower())
+        
+        normalized = split_map.get(split_lower, split_lower)
+        
+        if normalized not in self.VALID_SPLITS:
+            raise ValueError(
+                f"Invalid split '{split}'. "
+                f"Valid splits are: {sorted(self.VALID_SPLITS)}. "
+                f"Use 'validation' (or 'valid'/'val') for the validation split."
+            )
+        
+        return normalized
     
     def _load_with_retry(
         self, 
@@ -139,7 +160,8 @@ class PianoVAMDataset:
         download_config: Optional[Any]
     ):
         """Load dataset with retry logic for handling timeouts."""
-        # Normalize split name (validation -> valid)
+        # Normalize split name to HuggingFace API format
+        # e.g., 'valid' -> 'validation', 'val' -> 'validation'
         normalized_split = self._normalize_split_name(split)
         
         last_error = None
@@ -151,77 +173,27 @@ class PianoVAMDataset:
                 else:
                     print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
                 
-                # For streaming mode, try direct split loading
-                if streaming:
-                    # Try normalized name first (e.g., 'validation')
-                    try:
-                        dataset = load_dataset(
-                            self.DATASET_NAME,
-                            split=normalized_split,
-                            streaming=True,
-                            download_config=download_config
-                        )
-                        return dataset
-                    except ValueError as split_error:
-                        # If normalized name fails, try original name
-                        if 'Bad split' in str(split_error) and normalized_split != split.lower():
-                            print(f"Split '{normalized_split}' not found. Trying original name '{split}'...")
-                            try:
-                                dataset = load_dataset(
-                                    self.DATASET_NAME,
-                                    split=split,
-                                    streaming=True,
-                                    download_config=download_config
-                                )
-                                return dataset
-                            except ValueError:
-                                # Both failed, raise with helpful message
-                                raise ValueError(
-                                    f"Split '{split}' (tried as '{normalized_split}') not found. "
-                                    f"Common splits for this dataset: 'train', 'validation', 'test'. "
-                                    f"Note: 'valid' and 'val' map to 'validation'."
-                                )
-                        else:
-                            raise
-                else:
-                    # Non-streaming: load directly
-                    dataset = load_dataset(
-                        self.DATASET_NAME,
-                        split=normalized_split,
-                        streaming=False,
-                        download_config=download_config
-                    )
-                    return dataset
-            except ValueError as e:
-                # Check if it's a split name error
-                error_str = str(e)
-                if 'Bad split' in error_str or 'split' in error_str.lower():
-                    # Try to get available splits
-                    try:
-                        full_dataset = load_dataset(
-                            self.DATASET_NAME,
-                            download_config=download_config,
-                            download_mode="reuse_dataset_if_exists"
-                        )
-                        if isinstance(full_dataset, dict):
-                            available = list(full_dataset.keys())
-                            raise ValueError(
-                                f"Split '{split}' (mapped to '{normalized_split}') not found. "
-                                f"Available splits: {available}. "
-                                f"Note: Use 'validation' (or 'valid'/'val' which map to 'validation')."
-                            )
-                    except Exception as inner_e:
-                        if 'Bad split' not in str(inner_e):
-                            # Re-raise original error if inner call fails for different reason
-                            raise e
-                    raise
-                else:
-                    # For other ValueError, raise immediately
-                    raise
+                # Load dataset with the normalized split name
+                dataset = load_dataset(
+                    self.DATASET_NAME,
+                    split=normalized_split,
+                    streaming=streaming,
+                    download_config=download_config
+                )
+                return dataset
+                
             except Exception as e:
                 last_error = e
                 error_name = type(e).__name__
                 error_str = str(e).lower()
+                
+                # Check for split-related errors - don't retry these
+                if 'bad split' in error_str or 'unknown split' in error_str:
+                    raise ValueError(
+                        f"Split '{split}' (normalized to '{normalized_split}') not found. "
+                        f"Valid splits for PianoVAM are: {sorted(self.VALID_SPLITS)}. "
+                        f"Note: Use 'validation' (or 'valid'/'val') for validation split."
+                    )
                 
                 # Check for HTTP errors (502, 503, 504, etc.)
                 is_http_error = (
@@ -235,13 +207,14 @@ class PianoVAMDataset:
                     'gateway timeout' in error_str
                 )
                 
-                if 'Timeout' in error_name or 'timeout' in error_str:
+                is_timeout = 'Timeout' in error_name or 'timeout' in error_str
+                is_connection = 'Connection' in error_name or 'connection' in error_str
+                
+                if is_timeout or is_http_error or is_connection:
                     wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
-                    print(f"Timeout error. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                elif is_http_error or 'Connection' in error_name or 'connection' in error_str:
-                    wait_time = 2 ** attempt
-                    if is_http_error:
+                    if is_timeout:
+                        print(f"Timeout error. Retrying in {wait_time}s...")
+                    elif is_http_error:
                         print(f"HTTP error (likely temporary server issue). Retrying in {wait_time}s...")
                     else:
                         print(f"Connection error. Retrying in {wait_time}s...")
@@ -259,7 +232,7 @@ class PianoVAMDataset:
             f"2. Check your internet connection\n"
             f"3. Try increasing timeout (current: {self.timeout}s)\n"
             f"4. Set HF_TOKEN in Colab secrets for better rate limits\n"
-            f"5. Use 'validation' (or 'valid'/'val') for the validation split"
+            f"5. Valid splits are: {sorted(self.VALID_SPLITS)}"
         )
         
     def __len__(self) -> int:
