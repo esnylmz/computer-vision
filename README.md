@@ -3,7 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.12+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/piano-fingering-detection/blob/main/notebooks/06_full_pipeline.ipynb)
+
 
 A computer vision system that automatically detects piano fingering (which finger plays each note) from video recordings. Developed as a Master's thesis project at Sapienza University of Rome.
 
@@ -127,10 +127,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 - PianoVAM dataset creators (KAIST)
 - Sapienza University Computer Vision course
 - Referenced paper authors
-
-## 📧 Contact
-
-[Your Name] - [your.email@example.com]
-
-Project Link: [https://github.com/YOUR_USERNAME/piano-fingering-detection](https://github.com/YOUR_USERNAME/piano-fingering-detection)
 
