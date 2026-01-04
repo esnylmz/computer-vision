@@ -279,27 +279,18 @@ class PianoVAMDataset:
                         # Filter to ensure we only get train samples
                         return dataset.filter(lambda x: (x.get('split') or x.get('Split', '')) == split_column_value)
                 else:
-                    # Non-streaming: load all splits
-                    try:
-                        full_dataset = load_dataset(
-                            self.DATASET_NAME,
-                            download_config=download_config
-                        )
-                        # Concatenate all splits
-                        from datasets import concatenate_datasets
-                        all_splits = [full_dataset[s] for s in full_dataset.keys()]
-                        combined = concatenate_datasets(all_splits)
-                        # Filter by split column
-                        return combined.filter(lambda x: x.get('split', '') == split_column_value)
-                    except Exception:
-                        # Fallback to just train
-                        dataset = load_dataset(
-                            self.DATASET_NAME,
-                            split='train',
-                            streaming=False,
-                            download_config=download_config
-                        )
-                        return dataset.filter(lambda x: x.get('split', '') == split_column_value)
+                    # Non-streaming: Load 'train' split (contains all 107 rows with different 'split' column values)
+                    # Then filter by the 'split' column to get the desired subset
+                    print(f"Loading 'train' split (contains all data) and filtering for '{split_column_value}'...")
+                    dataset = load_dataset(
+                        self.DATASET_NAME,
+                        split='train',
+                        streaming=False,
+                        download_config=download_config
+                    )
+                    # Filter by split column to get only rows matching our desired split
+                    filtered = dataset.filter(lambda x: (x.get('split') or x.get('Split', '')) == split_column_value)
+                    return filtered
                 
             except Exception as e:
                 last_error = e
