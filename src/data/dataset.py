@@ -19,12 +19,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from tqdm import tqdm
+import time
 
 try:
     from datasets import load_dataset
+    from datasets import DownloadConfig
 except ImportError:
     load_dataset = None
+    DownloadConfig = None
 
 
 @dataclass
@@ -55,7 +60,9 @@ class PianoVAMDataset:
         self, 
         split: str = 'train', 
         cache_dir: str = './data/cache',
-        streaming: bool = True
+        streaming: bool = True,
+        timeout: int = 120,
+        max_retries: int = 5
     ):
         """
         Initialize PianoVAM dataset.
@@ -64,20 +71,33 @@ class PianoVAMDataset:
             split: Dataset split ('train', 'validation', 'test')
             cache_dir: Directory to cache downloaded files
             streaming: If True, stream data without downloading full dataset
+            timeout: Request timeout in seconds (default: 120)
+            max_retries: Maximum number of retries for network errors (default: 5)
         """
         self.split = split
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.streaming = streaming
+        self.timeout = timeout
+        self.max_retries = max_retries
         
         # Load dataset metadata from HuggingFace
         if load_dataset is None:
             raise ImportError("Please install 'datasets' package: pip install datasets")
         
-        self.hf_dataset = load_dataset(
-            self.DATASET_NAME, 
+        # Configure download with extended timeout and retries
+        download_config = None
+        if DownloadConfig is not None:
+            download_config = DownloadConfig(
+                max_retries=max_retries,
+                resume_download=True,
+            )
+        
+        # Load with retry logic for network issues
+        self.hf_dataset = self._load_with_retry(
             split=split,
-            streaming=streaming
+            streaming=streaming,
+            download_config=download_config
         )
         
         # Convert to list if not streaming for indexing
@@ -86,6 +106,52 @@ class PianoVAMDataset:
         else:
             self._samples = None
             self._iterator = None
+    
+    def _load_with_retry(
+        self, 
+        split: str, 
+        streaming: bool, 
+        download_config: Optional[Any]
+    ):
+        """Load dataset with retry logic for handling timeouts."""
+        last_error = None
+        
+        for attempt in range(self.max_retries):
+            try:
+                print(f"Loading dataset (attempt {attempt + 1}/{self.max_retries})...")
+                dataset = load_dataset(
+                    self.DATASET_NAME,
+                    split=split,
+                    streaming=streaming,
+                    download_config=download_config,
+                    trust_remote_code=True
+                )
+                return dataset
+            except Exception as e:
+                last_error = e
+                error_name = type(e).__name__
+                if 'Timeout' in error_name or 'timeout' in str(e).lower():
+                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
+                    print(f"Timeout error on attempt {attempt + 1}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                elif 'Connection' in error_name or 'connection' in str(e).lower():
+                    wait_time = 2 ** attempt
+                    print(f"Connection error on attempt {attempt + 1}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    # For non-network errors, raise immediately
+                    raise
+        
+        # If all retries failed, raise the last error
+        raise RuntimeError(
+            f"Failed to load dataset after {self.max_retries} attempts. "
+            f"Last error: {last_error}\n\n"
+            f"Tips:\n"
+            f"1. Try using streaming=True to avoid downloading all files at once\n"
+            f"2. Check your internet connection\n"
+            f"3. Try increasing timeout (current: {self.timeout}s)\n"
+            f"4. Set HF_TOKEN in Colab secrets for better rate limits"
+        )
         
     def __len__(self) -> int:
         if self._samples is not None:
