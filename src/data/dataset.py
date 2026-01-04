@@ -212,6 +212,14 @@ class PianoVAMDataset:
                         print(f"Note: HuggingFace split '{hf_split_name}' not available, using column filtering...")
                     else:
                         raise
+                except Exception as split_error:
+                    # Catch other split-related errors (like ExpectedMoreSplitsError)
+                    error_str = str(split_error).lower()
+                    error_name = type(split_error).__name__
+                    if 'expectedmoresplits' in error_name.lower() or 'bad split' in error_str or 'unknown split' in error_str or 'not found' in error_str or 'split' in error_str:
+                        print(f"Note: HuggingFace split '{hf_split_name}' not available, using column filtering...")
+                    else:
+                        raise
                 
                 # Strategy 2: Load all data and filter by 'split' column
                 if streaming:
