@@ -119,39 +119,40 @@ class PianoVAMDataset:
             self._samples = None
             self._iterator = None
     
-    # Valid HuggingFace API split names for this dataset
-    VALID_SPLITS = {'train', 'validation', 'test'}
+    # Valid split names that users can request
+    # Maps user input -> value in 'split' column of dataset
+    SPLIT_COLUMN_MAP = {
+        'train': 'train',
+        'validation': 'valid',  # HF API uses 'validation', but column has 'valid'
+        'valid': 'valid',
+        'val': 'valid',
+        'test': 'test',
+    }
     
-    def _normalize_split_name(self, split: str) -> str:
+    def _get_split_column_value(self, split: str) -> str:
         """
-        Normalize split name to match HuggingFace API conventions.
+        Convert user's split name to the value used in the dataset's 'split' column.
         
-        IMPORTANT: The HuggingFace API split names are: 'train', 'validation', 'test'
-        But the 'split' COLUMN inside the data has different values: 'train', 'valid', 'test'
+        The PianoVAM dataset has a 'split' column with values: 'train', 'valid', 'test'
+        Note: The column uses 'valid' NOT 'validation'!
         
-        This function normalizes user input to HuggingFace API split names.
+        Args:
+            split: User-provided split name ('train', 'validation', 'valid', 'val', 'test')
+            
+        Returns:
+            The corresponding value in the 'split' column ('train', 'valid', or 'test')
         """
         split_lower = split.lower().strip()
         
-        # Map common variations to HuggingFace API split names
-        split_map = {
-            'valid': 'validation',     # User says 'valid' -> API uses 'validation'
-            'val': 'validation',       # User says 'val' -> API uses 'validation'
-            'train': 'train',
-            'test': 'test',
-            'validation': 'validation'
-        }
-        
-        normalized = split_map.get(split_lower, split_lower)
-        
-        if normalized not in self.VALID_SPLITS:
+        if split_lower not in self.SPLIT_COLUMN_MAP:
+            valid_inputs = sorted(set(self.SPLIT_COLUMN_MAP.keys()))
             raise ValueError(
                 f"Invalid split '{split}'. "
-                f"Valid splits are: {sorted(self.VALID_SPLITS)}. "
-                f"Use 'validation' (or 'valid'/'val') for the validation split."
+                f"Valid options: {valid_inputs}. "
+                f"Use 'validation', 'valid', or 'val' for validation split."
             )
         
-        return normalized
+        return self.SPLIT_COLUMN_MAP[split_lower]
     
     def _load_with_retry(
         self, 
@@ -159,41 +160,95 @@ class PianoVAMDataset:
         streaming: bool, 
         download_config: Optional[Any]
     ):
-        """Load dataset with retry logic for handling timeouts."""
-        # Normalize split name to HuggingFace API format
-        # e.g., 'valid' -> 'validation', 'val' -> 'validation'
-        normalized_split = self._normalize_split_name(split)
+        """
+        Load dataset and filter by split column.
+        
+        The PianoVAM dataset has a quirk: HuggingFace API splits (train/validation/test) 
+        don't always work in streaming mode. Instead, we load the full dataset and 
+        filter by the 'split' column which has values: 'train', 'valid', 'test'.
+        """
+        # Get the column value to filter by
+        split_column_value = self._get_split_column_value(split)
         
         last_error = None
         
         for attempt in range(self.max_retries):
             try:
                 if attempt == 0:
-                    print(f"Loading dataset split '{normalized_split}' (attempt {attempt + 1}/{self.max_retries})...")
+                    print(f"Loading dataset (filtering for split='{split_column_value}')...")
                 else:
                     print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
                 
-                # Load dataset with the normalized split name
-                dataset = load_dataset(
-                    self.DATASET_NAME,
-                    split=normalized_split,
-                    streaming=streaming,
-                    download_config=download_config
-                )
-                return dataset
+                # Strategy: Load ALL data by combining splits, then filter by 'split' column
+                # This works around HuggingFace's split resolution issues in streaming mode
+                
+                if streaming:
+                    # Try to load all splits and concatenate
+                    try:
+                        # First try loading without a split (gets all data as dict)
+                        full_dataset = load_dataset(
+                            self.DATASET_NAME,
+                            streaming=True,
+                            download_config=download_config
+                        )
+                        split_keys = list(full_dataset.keys())
+                        
+                        # Wrap in a re-iterable filtered class
+                        class FilteredStreamingDataset:
+                            """A re-iterable filtered dataset wrapper."""
+                            def __init__(self, dataset_dict, split_keys, filter_value):
+                                self._dataset_dict = dataset_dict
+                                self._split_keys = split_keys
+                                self._filter_value = filter_value
+                            
+                            def __iter__(self):
+                                # Create fresh chain each time we iterate
+                                from itertools import chain
+                                all_data = chain(*[self._dataset_dict[s] for s in self._split_keys])
+                                for item in all_data:
+                                    if item.get('split', '') == self._filter_value:
+                                        yield item
+                        
+                        return FilteredStreamingDataset(full_dataset, split_keys, split_column_value)
+                        
+                    except Exception as inner_e:
+                        # Fallback: try just 'train' split (might have all data)
+                        print(f"Note: Falling back to 'train' split only...")
+                        dataset = load_dataset(
+                            self.DATASET_NAME,
+                            split='train',
+                            streaming=True,
+                            download_config=download_config
+                        )
+                        # Filter by split column
+                        return dataset.filter(lambda x: x.get('split', '') == split_column_value)
+                else:
+                    # Non-streaming: load all splits
+                    try:
+                        full_dataset = load_dataset(
+                            self.DATASET_NAME,
+                            download_config=download_config
+                        )
+                        # Concatenate all splits
+                        from datasets import concatenate_datasets
+                        all_splits = [full_dataset[s] for s in full_dataset.keys()]
+                        combined = concatenate_datasets(all_splits)
+                        # Filter by split column
+                        return combined.filter(lambda x: x.get('split', '') == split_column_value)
+                    except Exception:
+                        # Fallback to just train
+                        dataset = load_dataset(
+                            self.DATASET_NAME,
+                            split='train',
+                            streaming=False,
+                            download_config=download_config
+                        )
+                        return dataset.filter(lambda x: x.get('split', '') == split_column_value)
                 
             except Exception as e:
                 last_error = e
                 error_name = type(e).__name__
                 error_str = str(e).lower()
-                
-                # Check for split-related errors - don't retry these
-                if 'bad split' in error_str or 'unknown split' in error_str:
-                    raise ValueError(
-                        f"Split '{split}' (normalized to '{normalized_split}') not found. "
-                        f"Valid splits for PianoVAM are: {sorted(self.VALID_SPLITS)}. "
-                        f"Note: Use 'validation' (or 'valid'/'val') for validation split."
-                    )
                 
                 # Check for HTTP errors (502, 503, 504, etc.)
                 is_http_error = (
@@ -228,11 +283,9 @@ class PianoVAMDataset:
             f"Failed to load dataset after {self.max_retries} attempts. "
             f"Last error: {last_error}\n\n"
             f"Tips:\n"
-            f"1. Try using streaming=True to avoid downloading all files at once\n"
-            f"2. Check your internet connection\n"
-            f"3. Try increasing timeout (current: {self.timeout}s)\n"
-            f"4. Set HF_TOKEN in Colab secrets for better rate limits\n"
-            f"5. Valid splits are: {sorted(self.VALID_SPLITS)}"
+            f"1. Check your internet connection\n"
+            f"2. Try increasing timeout (current: {self.timeout}s)\n"
+            f"3. Set HF_TOKEN in Colab secrets for better rate limits"
         )
         
     def __len__(self) -> int:
