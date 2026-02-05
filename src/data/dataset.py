@@ -103,18 +103,24 @@ class PianoVAMDataset:
                 resume_download=True,
             )
         
-        # Load with retry logic for network issues
+        # Load the HuggingFace dataset (always streams the single 'train' split)
         self.hf_dataset = self._load_with_retry(
             split=split,
             streaming=streaming,
             download_config=download_config
         )
         
-        # Convert to list if not streaming for indexing
+        # For non-streaming mode, eagerly collect filtered samples into a list
         if not streaming:
-            self._samples = list(self.hf_dataset)
-            if self.max_samples is not None:
-                self._samples = self._samples[:self.max_samples]
+            split_column_value = self._get_split_column_value(split)
+            self._samples = []
+            for row in self.hf_dataset:
+                row_split = row.get('split') or row.get('Split', '')
+                if row_split == split_column_value:
+                    self._samples.append(row)
+                    if self.max_samples is not None and len(self._samples) >= self.max_samples:
+                        break
+            print(f"  Loaded {len(self._samples)} samples for split '{split}'")
         else:
             self._samples = None
             self._iterator = None
@@ -162,143 +168,36 @@ class PianoVAMDataset:
         _recursion_depth: int = 0
     ):
         """
-        Load dataset and filter by split column.
+        Load dataset from HuggingFace and prepare for split-column filtering.
         
-        The PianoVAM dataset has a quirk: HuggingFace API splits (train/validation/test) 
-        don't always work in streaming mode. We try API splits first, then fall back to 
-        loading all data and filtering by the 'split' column.
+        IMPORTANT: PianoVAM on HuggingFace has only ONE actual split called 'train'
+        that contains ALL 107 samples. Each row has a 'split' column with values:
+        'train' (73 rows), 'valid' (19 rows), or 'test' (14 rows).
         
-        Args:
-            _recursion_depth: Internal parameter to prevent infinite recursion
+        We ALWAYS load the 'train' split in streaming mode (to avoid downloading
+        gigabytes of audio/video files), then filter by the 'split' column in __iter__.
         """
-        # Prevent infinite recursion
-        if _recursion_depth > 1:
-            raise RuntimeError("Too many recursive calls in dataset loading. This indicates a bug.")
-        
-        # Get the column value to filter by
         split_column_value = self._get_split_column_value(split)
-        
-        # Map to HuggingFace API split names
-        hf_split_map = {
-            'train': 'train',
-            'valid': 'validation',  # Column has 'valid', API uses 'validation'
-            'test': 'test'
-        }
-        hf_split_name = hf_split_map.get(split_column_value, split_column_value)
         
         last_error = None
         
         for attempt in range(self.max_retries):
             try:
                 if attempt == 0:
-                    print(f"Loading dataset split '{split}' (column value: '{split_column_value}')...")
+                    print(f"Loading PianoVAM (filtering for split='{split_column_value}')...")
                 else:
                     print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
                 
-                # Strategy 1: Try using HuggingFace API splits directly
-                try:
-                    dataset = load_dataset(
-                        self.DATASET_NAME,
-                        split=hf_split_name,
-                        streaming=streaming,
-                        download_config=download_config
-                    )
-                    # Success! Return it (it should already be filtered by HuggingFace)
-                    return dataset
-                except (ValueError, KeyError) as split_error:
-                    # API split doesn't work, fall back to filtering
-                    error_str = str(split_error).lower()
-                    if 'bad split' in error_str or 'unknown split' in error_str or 'not found' in error_str:
-                        print(f"Note: HuggingFace split '{hf_split_name}' not available, using column filtering...")
-                    else:
-                        raise
-                except Exception as split_error:
-                    # Catch other split-related errors (like ExpectedMoreSplitsError)
-                    error_str = str(split_error).lower()
-                    error_name = type(split_error).__name__
-                    if 'expectedmoresplits' in error_name.lower() or 'bad split' in error_str or 'unknown split' in error_str or 'not found' in error_str or 'split' in error_str:
-                        print(f"Note: HuggingFace split '{hf_split_name}' not available, using column filtering...")
-                    else:
-                        raise
-                
-                # Strategy 2: Load all data and filter by 'split' column
-                if streaming:
-                    # Strategy: Load all splits and filter by 'split' column
-                    # HuggingFace streaming mode sometimes only exposes 'train' split
-                    # So we need to load all available splits and filter
-                    try:
-                        # Try loading without split parameter to get all splits
-                        full_dataset = load_dataset(
-                            self.DATASET_NAME,
-                            streaming=True,
-                            download_config=download_config
-                        )
-                        
-                        # Check what splits we got
-                        if isinstance(full_dataset, dict):
-                            split_keys = list(full_dataset.keys())
-                            print(f"Found splits: {split_keys}")
-                        else:
-                            # Single dataset, wrap it
-                            split_keys = ['default']
-                            full_dataset = {'default': full_dataset}
-                        
-                        # If only 'train' is available and user wants a different split,
-                        # we need non-streaming mode to access other splits
-                        if len(split_keys) == 1 and split_keys[0] == 'train' and split_column_value != 'train':
-                            print(f"Note: Only 'train' split available in streaming mode. Switching to non-streaming mode...")
-                            return self._load_with_retry(split, streaming=False, download_config=download_config, _recursion_depth=_recursion_depth + 1)
-                        
-                        # Create a filtered iterator that chains all splits
-                        class FilteredStreamingDataset:
-                            """A re-iterable filtered dataset wrapper."""
-                            def __init__(self, dataset_dict, split_keys, filter_value):
-                                self._dataset_dict = dataset_dict
-                                self._split_keys = split_keys
-                                self._filter_value = filter_value
-                            
-                            def __iter__(self):
-                                # Iterate through each split and filter
-                                for split_key in self._split_keys:
-                                    split_data = self._dataset_dict[split_key]
-                                    for item in split_data:
-                                        # Check both 'split' and 'Split' (case variations)
-                                        item_split = item.get('split') or item.get('Split', '')
-                                        if item_split == self._filter_value:
-                                            yield item
-                        
-                        return FilteredStreamingDataset(full_dataset, split_keys, split_column_value)
-                        
-                    except Exception as inner_e:
-                        # If we can't load all splits, fall back to just 'train' split
-                        # But if user wants non-train split, we need non-streaming mode
-                        if split_column_value != 'train':
-                            print(f"Note: Cannot load all splits in streaming mode. Switching to non-streaming mode...")
-                            return self._load_with_retry(split, streaming=False, download_config=download_config, _recursion_depth=_recursion_depth + 1)
-                        
-                        # For 'train' split, we can use the 'train' split directly
-                        print(f"Note: Loading 'train' split...")
-                        dataset = load_dataset(
-                            self.DATASET_NAME,
-                            split='train',
-                            streaming=True,
-                            download_config=download_config
-                        )
-                        # Filter to ensure we only get train samples
-                        return dataset.filter(lambda x: (x.get('split') or x.get('Split', '')) == split_column_value)
-                else:
-                    # Non-streaming: Load 'train' split (contains all 107 rows with different 'split' column values)
-                    # Then filter by the 'split' column to get the desired subset
-                    print(f"Loading 'train' split (contains all data) and filtering for '{split_column_value}'...")
-                    dataset = load_dataset(
-                        self.DATASET_NAME,
-                        split='train',
-                        streaming=False,
-                        download_config=download_config
-                    )
-                    # Filter by split column to get only rows matching our desired split
-                    filtered = dataset.filter(lambda x: (x.get('split') or x.get('Split', '')) == split_column_value)
-                    return filtered
+                # Always load the single 'train' HuggingFace split in streaming mode.
+                # This avoids downloading all audio/video files upfront.
+                # The 'split' column filtering happens in __iter__.
+                dataset = load_dataset(
+                    self.DATASET_NAME,
+                    split='train',
+                    streaming=True,
+                    download_config=download_config
+                )
+                return dataset
                 
             except Exception as e:
                 last_error = e
@@ -382,14 +281,13 @@ class PianoVAMDataset:
                     raise ValueError(
                         f"No samples found for split '{self.split}' (filtering for column value '{split_column_value}'). "
                         f"Processed {sample_count_before_filter} rows but none matched the filter.\n"
-                        f"This likely means the HuggingFace split only contains different split values.\n"
-                        f"Try using streaming=False to load all splits, or check if the dataset structure is correct."
+                        f"Check that the dataset's 'split' column contains the value '{split_column_value}'."
                     )
                 else:
                     # No data at all
                     raise ValueError(
                         f"No samples found for split '{self.split}'. The dataset appears to be empty.\n"
-                        f"Try loading with streaming=False to debug, or check the dataset structure."
+                        f"Check your internet connection and the dataset status on HuggingFace."
                     )
     
     def _row_to_sample(self, row: Dict) -> PianoVAMSample:
