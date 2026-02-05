@@ -354,7 +354,8 @@ class PianoVAMDataset:
             local_path,
             sep='\t',
             names=['onset', 'key_offset', 'frame_offset', 'note', 'velocity'],
-            header=None
+            header=None,
+            comment='#'
         )
 
         return df
