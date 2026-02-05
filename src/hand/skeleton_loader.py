@@ -168,10 +168,13 @@ class SkeletonLoader:
     ):
         """Parse a single frame's hand data."""
         for hand_type in ['left', 'right']:
-            hand_key = f'{hand_type}_hand'
-            alt_key = hand_type
+            hand_key = f'{hand_type}_hand'          # e.g. 'left_hand'
+            alt_key = hand_type                      # e.g. 'left'
+            cap_key = hand_type.capitalize()         # e.g. 'Left'  (PianoVAM format)
             
-            hand_data = frame_data.get(hand_key, frame_data.get(alt_key))
+            hand_data = (frame_data.get(hand_key)
+                         or frame_data.get(alt_key)
+                         or frame_data.get(cap_key))
             
             if hand_data is None:
                 continue
