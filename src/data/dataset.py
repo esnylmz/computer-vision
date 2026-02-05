@@ -1,15 +1,24 @@
 """
 PianoVAM Dataset Loader
 
-Loads the PianoVAM dataset from HuggingFace and provides convenient access
-to video, audio, MIDI, and hand skeleton data for each recording.
+Loads the PianoVAM dataset metadata from HuggingFace and provides convenient
+access to video, audio, MIDI, and hand skeleton data for each recording.
+
+Architecture:
+    The PianoVAM HuggingFace repo stores files in folders:
+        Audio/, Video/, MIDI/, Handskeleton/, TSV/
+    and a metadata JSON file (metadata_v1.json) that describes each sample.
+
+    HuggingFace's `load_dataset()` does NOT properly load this dataset's
+    metadata columns (it only sees Audio files). We therefore download
+    `metadata_v1.json` directly and construct sample objects from it.
 
 Usage:
     from src.data.dataset import PianoVAMDataset
-    
+
     dataset = PianoVAMDataset(split='train')
-    sample = dataset[0]
-    # sample contains: video_path, audio_path, midi_path, skeleton_path, metadata
+    for sample in dataset:
+        print(sample.id, sample.metadata['composer'])
 """
 
 import json
@@ -23,13 +32,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
 import time
-
-try:
-    from datasets import load_dataset
-    from datasets import DownloadConfig
-except ImportError:
-    load_dataset = None
-    DownloadConfig = None
 
 
 @dataclass
@@ -47,22 +49,38 @@ class PianoVAMSample:
 class PianoVAMDataset:
     """
     PianoVAM Dataset wrapper for piano fingering detection.
-    
+
+    Loads metadata directly from the HuggingFace repository's metadata_v1.json
+    file (a small JSON download) and constructs sample objects with full URLs.
+    Individual data files (skeleton, TSV, audio, etc.) are downloaded on demand.
+
     Attributes:
         split: One of 'train', 'validation' (or 'valid'/'val'), 'test'
         cache_dir: Directory to cache downloaded files
-    
-    Note:
-        The dataset uses 'validation' for the validation split. The loader automatically
-        maps 'valid' and 'val' to 'validation' for convenience.
+
+    Split mapping (metadata_v1.json 'split' column values):
+        train  → 73 samples
+        valid  → 19 samples
+        test   → 14 samples
+        (+ 1 special sample, excluded by default)
     """
-    
+
     DATASET_NAME = "PianoVAM/PianoVAM_v1.0"
     BASE_URL = "https://huggingface.co/datasets/PianoVAM/PianoVAM_v1.0/resolve/main/"
-    
+    METADATA_URL = BASE_URL + "metadata_v1.json"
+
+    # Maps user-facing split names → values in the 'split' column of metadata
+    SPLIT_COLUMN_MAP = {
+        'train': 'train',
+        'validation': 'valid',
+        'valid': 'valid',
+        'val': 'valid',
+        'test': 'test',
+    }
+
     def __init__(
-        self, 
-        split: str = 'train', 
+        self,
+        split: str = 'train',
         cache_dir: str = './data/cache',
         streaming: bool = True,
         timeout: int = 120,
@@ -71,15 +89,15 @@ class PianoVAMDataset:
     ):
         """
         Initialize PianoVAM dataset.
-        
+
         Args:
             split: Dataset split ('train', 'validation'/'valid'/'val', 'test')
             cache_dir: Directory to cache downloaded files
-            streaming: If True, stream data without downloading full dataset
+            streaming: Kept for API compatibility (metadata always loaded eagerly)
             timeout: Request timeout in seconds (default: 120)
             max_retries: Maximum number of retries for network errors (default: 5)
-            max_samples: Maximum number of samples to load (None = all). Useful for exploration.
-        
+            max_samples: Maximum number of samples to load (None = all)
+
         Note:
             'valid' and 'val' are automatically mapped to 'validation'.
         """
@@ -90,238 +108,161 @@ class PianoVAMDataset:
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_samples = max_samples
-        
-        # Load dataset metadata from HuggingFace
-        if load_dataset is None:
-            raise ImportError("Please install 'datasets' package: pip install datasets")
-        
-        # Configure download with extended timeout and retries
-        download_config = None
-        if DownloadConfig is not None:
-            download_config = DownloadConfig(
-                max_retries=max_retries,
-                resume_download=True,
-            )
-        
-        # Load the HuggingFace dataset (always streams the single 'train' split)
-        self.hf_dataset = self._load_with_retry(
-            split=split,
-            streaming=streaming,
-            download_config=download_config
-        )
-        
-        # For non-streaming mode, eagerly collect filtered samples into a list
-        if not streaming:
-            split_column_value = self._get_split_column_value(split)
-            self._samples = []
-            for row in self.hf_dataset:
-                row_split = row.get('split') or row.get('Split', '')
-                if row_split == split_column_value:
-                    self._samples.append(row)
-                    if self.max_samples is not None and len(self._samples) >= self.max_samples:
-                        break
-            print(f"  Loaded {len(self._samples)} samples for split '{split}'")
-        else:
-            self._samples = None
-            self._iterator = None
-    
-    # Valid split names that users can request
-    # Maps user input -> value in 'split' column of dataset
-    SPLIT_COLUMN_MAP = {
-        'train': 'train',
-        'validation': 'valid',  # HF API uses 'validation', but column has 'valid'
-        'valid': 'valid',
-        'val': 'valid',
-        'test': 'test',
-    }
-    
+
+        # Resolve the split column value
+        self._split_value = self._get_split_column_value(split)
+
+        # Load metadata from HuggingFace
+        metadata = self._load_metadata()
+
+        # Filter by split and apply max_samples
+        self._samples: List[Dict[str, Any]] = []
+        for key in sorted(metadata.keys(), key=lambda k: int(k)):
+            entry = metadata[key]
+            if entry.get('split', '') == self._split_value:
+                self._samples.append(entry)
+                if self.max_samples is not None and len(self._samples) >= self.max_samples:
+                    break
+
+        print(f"  ✅ Loaded {len(self._samples)} '{self._split_value}' samples")
+
+    # ------------------------------------------------------------------
+    # Split name resolution
+    # ------------------------------------------------------------------
+
     def _get_split_column_value(self, split: str) -> str:
         """
-        Convert user's split name to the value used in the dataset's 'split' column.
-        
-        The PianoVAM dataset has a 'split' column with values: 'train', 'valid', 'test'
+        Convert user's split name to the value used in metadata's 'split' column.
+
+        The PianoVAM metadata uses: 'train', 'valid', 'test'
         Note: The column uses 'valid' NOT 'validation'!
-        
-        Args:
-            split: User-provided split name ('train', 'validation', 'valid', 'val', 'test')
-            
-        Returns:
-            The corresponding value in the 'split' column ('train', 'valid', or 'test')
         """
         split_lower = split.lower().strip()
-        
+
         if split_lower not in self.SPLIT_COLUMN_MAP:
             valid_inputs = sorted(set(self.SPLIT_COLUMN_MAP.keys()))
             raise ValueError(
                 f"Invalid split '{split}'. "
                 f"Valid options: {valid_inputs}. "
-                f"Use 'validation', 'valid', or 'val' for validation split."
+                f"Use 'validation', 'valid', or 'val' for the validation split."
             )
-        
+
         return self.SPLIT_COLUMN_MAP[split_lower]
-    
-    def _load_with_retry(
-        self, 
-        split: str, 
-        streaming: bool, 
-        download_config: Optional[Any],
-        _recursion_depth: int = 0
-    ):
+
+    # ------------------------------------------------------------------
+    # Metadata loading
+    # ------------------------------------------------------------------
+
+    def _load_metadata(self) -> Dict[str, Dict]:
         """
-        Load dataset from HuggingFace and prepare for split-column filtering.
-        
-        IMPORTANT: PianoVAM on HuggingFace has only ONE actual split called 'train'
-        that contains ALL 107 samples. Each row has a 'split' column with values:
-        'train' (73 rows), 'valid' (19 rows), or 'test' (14 rows).
-        
-        We ALWAYS load the 'train' split in streaming mode (to avoid downloading
-        gigabytes of audio/video files), then filter by the 'split' column in __iter__.
+        Download and cache metadata_v1.json from HuggingFace.
+
+        The file is a dict keyed by string indices ("0" .. "106"),
+        each value being a dict with fields:
+            record_time, split, composer, piece, performance_method,
+            performance_type, duration, P1_name, P1_skill, ...,
+            Point_LT, Point_RT, Point_RB, Point_LB
         """
-        split_column_value = self._get_split_column_value(split)
-        
+        # Try cache first
+        cache_path = self.cache_dir / "metadata_v1.json"
+        if cache_path.exists():
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        # Download with retries
         last_error = None
-        
         for attempt in range(self.max_retries):
             try:
                 if attempt == 0:
-                    print(f"Loading PianoVAM (filtering for split='{split_column_value}')...")
+                    print(f"Downloading PianoVAM metadata ...")
                 else:
-                    print(f"Retrying (attempt {attempt + 1}/{self.max_retries})...")
-                
-                # Always load the single 'train' HuggingFace split in streaming mode.
-                # This avoids downloading all audio/video files upfront.
-                # The 'split' column filtering happens in __iter__.
-                dataset = load_dataset(
-                    self.DATASET_NAME,
-                    split='train',
-                    streaming=True,
-                    download_config=download_config
-                )
-                return dataset
-                
+                    print(f"  Retry {attempt + 1}/{self.max_retries} ...")
+
+                resp = requests.get(self.METADATA_URL, timeout=self.timeout)
+                resp.raise_for_status()
+                metadata = resp.json()
+
+                # Cache for future use
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f)
+
+                return metadata
+
             except Exception as e:
                 last_error = e
-                error_name = type(e).__name__
                 error_str = str(e).lower()
-                
-                # Check for HTTP errors (502, 503, 504, etc.)
-                is_http_error = (
-                    'HTTPError' in error_name or 
-                    'HfHubHTTPError' in error_name or
-                    '502' in error_str or 
-                    '503' in error_str or 
-                    '504' in error_str or
-                    'bad gateway' in error_str or
-                    'service unavailable' in error_str or
-                    'gateway timeout' in error_str
-                )
-                
-                is_timeout = 'Timeout' in error_name or 'timeout' in error_str
-                is_connection = 'Connection' in error_name or 'connection' in error_str
-                
-                if is_timeout or is_http_error or is_connection:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4, 8, 16 seconds
-                    if is_timeout:
-                        print(f"Timeout error. Retrying in {wait_time}s...")
-                    elif is_http_error:
-                        print(f"HTTP error (likely temporary server issue). Retrying in {wait_time}s...")
-                    else:
-                        print(f"Connection error. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    # For non-network errors, raise immediately
+                is_retryable = any(kw in error_str for kw in [
+                    'timeout', 'connection', '502', '503', '504',
+                    'bad gateway', 'service unavailable', 'gateway timeout'
+                ])
+                if is_retryable and attempt < self.max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"  Network error, retrying in {wait}s ...")
+                    time.sleep(wait)
+                elif not is_retryable:
                     raise
-        
-        # If all retries failed, raise the last error
+
         raise RuntimeError(
-            f"Failed to load dataset after {self.max_retries} attempts. "
-            f"Last error: {last_error}\n\n"
-            f"Tips:\n"
-            f"1. Check your internet connection\n"
-            f"2. Try increasing timeout (current: {self.timeout}s)\n"
-            f"3. Set HF_TOKEN in Colab secrets for better rate limits"
+            f"Failed to download metadata after {self.max_retries} attempts.\n"
+            f"Last error: {last_error}\n"
+            f"URL: {self.METADATA_URL}"
         )
-        
+
+    # ------------------------------------------------------------------
+    # Container protocol
+    # ------------------------------------------------------------------
+
     def __len__(self) -> int:
-        if self._samples is not None:
-            return len(self._samples)
-        # For streaming, we don't know the length
-        return -1
-    
+        return len(self._samples)
+
     def __getitem__(self, idx: int) -> PianoVAMSample:
-        if self._samples is None:
-            raise ValueError("Cannot index streaming dataset. Set streaming=False.")
-        
-        row = self._samples[idx]
-        return self._row_to_sample(row)
-    
+        return self._row_to_sample(self._samples[idx])
+
     def __iter__(self):
-        if self._samples is not None:
-            for row in self._samples:
-                yield self._row_to_sample(row)
-        else:
-            count = 0
-            sample_count_before_filter = 0
-            split_column_value = self._get_split_column_value(self.split)
-            
-            for row in self.hf_dataset:
-                sample_count_before_filter += 1
-                # Check if this row matches our split filter
-                row_split = row.get('split') or row.get('Split', '')
-                if row_split == split_column_value:
-                    yield self._row_to_sample(row)
-                    count += 1
-                    if self.max_samples is not None and count >= self.max_samples:
-                        break
-            
-            # Debug info if no samples found
-            if count == 0:
-                if sample_count_before_filter > 0:
-                    # We had data but filtering removed it all
-                    raise ValueError(
-                        f"No samples found for split '{self.split}' (filtering for column value '{split_column_value}'). "
-                        f"Processed {sample_count_before_filter} rows but none matched the filter.\n"
-                        f"Check that the dataset's 'split' column contains the value '{split_column_value}'."
-                    )
-                else:
-                    # No data at all
-                    raise ValueError(
-                        f"No samples found for split '{self.split}'. The dataset appears to be empty.\n"
-                        f"Check your internet connection and the dataset status on HuggingFace."
-                    )
-    
+        for row in self._samples:
+            yield self._row_to_sample(row)
+
+    # ------------------------------------------------------------------
+    # Row → Sample conversion
+    # ------------------------------------------------------------------
+
     def _row_to_sample(self, row: Dict) -> PianoVAMSample:
-        """Convert a dataset row to PianoVAMSample."""
-        # Handle different possible column names
-        video_path = row.get('video_path', row.get('Video', ''))
-        audio_path = row.get('audio_path', row.get('Audio', ''))
-        midi_path = row.get('midi_path', row.get('Midi', ''))
-        skeleton_path = row.get('handskeleton_path', row.get('Handskeleton', ''))
-        tsv_path = row.get('tsv_path', row.get('TSV', ''))
-        
+        """Convert a metadata dict entry to PianoVAMSample."""
+        record_time = row.get('record_time', '')
+
+        # Build file paths from record_time
+        video_path = f"Video/{record_time}.mp4" if record_time else ''
+        audio_path = f"Audio/{record_time}.wav" if record_time else ''
+        midi_path = f"MIDI/{record_time}.mid" if record_time else ''
+        skeleton_path = f"Handskeleton/{record_time}.json" if record_time else ''
+        tsv_path = f"TSV/{record_time}.tsv" if record_time else ''
+
         return PianoVAMSample(
-            id=row.get('id', row.get('ID', str(hash(video_path)))),
+            id=record_time or str(hash(str(row))),
             video_path=self.BASE_URL + video_path if video_path else '',
             audio_path=self.BASE_URL + audio_path if audio_path else '',
             midi_path=self.BASE_URL + midi_path if midi_path else '',
             skeleton_path=self.BASE_URL + skeleton_path if skeleton_path else '',
             tsv_path=self.BASE_URL + tsv_path if tsv_path else '',
             metadata={
-                'composer': row.get('composer', row.get('Composer', 'Unknown')),
-                'piece': row.get('piece', row.get('Piece', 'Unknown')),
-                'performer': row.get('P1_name', row.get('Performer', 'Unknown')),
-                'skill_level': row.get('P1_skill', row.get('Skill', 'Unknown')),
-                'duration': row.get('duration', row.get('Duration', 0)),
+                'composer': row.get('composer', 'Unknown'),
+                'piece': row.get('piece', 'Unknown'),
+                'performer': row.get('P1_name', 'Unknown'),
+                'skill_level': row.get('P1_skill', 'Unknown'),
+                'duration': row.get('duration', ''),
+                'performance_method': row.get('performance_method', ''),
+                'performance_type': row.get('performance_type', ''),
+                'record_time': record_time,
                 'keyboard_corners': self._parse_corners(row)
             }
         )
-    
+
     def _parse_corners(self, row: Dict) -> Dict[str, Tuple[int, int]]:
         """Parse keyboard corner coordinates from row."""
         corners = {}
         for key in ['Point_LT', 'Point_RT', 'Point_RB', 'Point_LB']:
-            alt_key = key.replace('Point_', '')  # Try without 'Point_' prefix
-            value = row.get(key, row.get(alt_key, '0, 0'))
+            value = row.get(key, '0, 0')
             if isinstance(value, str):
                 try:
                     x, y = value.split(', ')
@@ -331,47 +272,52 @@ class PianoVAMDataset:
             else:
                 corners[key.replace('Point_', '')] = (0, 0)
         return corners
-    
+
+    # ------------------------------------------------------------------
+    # File download helpers
+    # ------------------------------------------------------------------
+
     def download_file(self, url: str, local_path: Optional[Path] = None) -> Path:
         """
         Download a file from URL to local cache.
-        
+
         Args:
             url: URL to download from
             local_path: Optional local path, otherwise uses cache_dir
-            
+
         Returns:
             Path to downloaded file
         """
         if local_path is None:
             filename = url.split('/')[-1]
             local_path = self.cache_dir / filename
-        
+
         if local_path.exists():
             return local_path
-        
+
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        response = requests.get(url, stream=True)
+
+        response = requests.get(url, stream=True, timeout=self.timeout)
         response.raise_for_status()
-        
+
         total_size = int(response.headers.get('content-length', 0))
-        
+
         with open(local_path, 'wb') as f:
-            with tqdm(total=total_size, unit='B', unit_scale=True) as pbar:
+            with tqdm(total=total_size, unit='B', unit_scale=True,
+                      desc=local_path.name) as pbar:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
                     pbar.update(len(chunk))
-        
+
         return local_path
-    
+
     def load_skeleton(self, sample: PianoVAMSample) -> Dict:
         """
         Load hand skeleton data from JSON file.
-        
+
         Args:
             sample: PianoVAMSample object
-            
+
         Returns:
             Dict containing hand landmark data with structure:
             {
@@ -380,42 +326,41 @@ class PianoVAMDataset:
         """
         if not sample.skeleton_path:
             raise ValueError(f"No skeleton path for sample {sample.id}")
-        
-        # Download if needed
+
         local_path = self.download_file(sample.skeleton_path)
-        
+
         with open(local_path, 'r') as f:
             skeleton_data = json.load(f)
-        
+
         return skeleton_data
-    
+
     def load_tsv_annotations(self, sample: PianoVAMSample) -> pd.DataFrame:
         """
         Load TSV annotations with columns:
         onset, key_offset, frame_offset, note, velocity
-        
+
         Args:
             sample: PianoVAMSample object
-            
+
         Returns:
             DataFrame with note annotations
         """
         if not sample.tsv_path:
             raise ValueError(f"No TSV path for sample {sample.id}")
-        
+
         local_path = self.download_file(sample.tsv_path)
-        
+
         df = pd.read_csv(
-            local_path, 
+            local_path,
             sep='\t',
             names=['onset', 'key_offset', 'frame_offset', 'note', 'velocity'],
             header=None
         )
-        
+
         return df
-    
+
     def get_sample_by_id(self, sample_id: str) -> Optional[PianoVAMSample]:
-        """Get a sample by its ID."""
+        """Get a sample by its ID (record_time)."""
         for sample in self:
             if sample.id == sample_id:
                 return sample
@@ -430,20 +375,19 @@ def load_pianovam(
 ) -> PianoVAMDataset:
     """
     Convenience function to load PianoVAM dataset.
-    
+
     Args:
         split: Dataset split
         cache_dir: Cache directory
-        streaming: Whether to stream data
+        streaming: Kept for API compatibility
         max_samples: Maximum number of samples to load (None = all)
-        
+
     Returns:
         PianoVAMDataset instance
     """
     return PianoVAMDataset(
-        split=split, 
-        cache_dir=cache_dir, 
+        split=split,
+        cache_dir=cache_dir,
         streaming=streaming,
         max_samples=max_samples
     )
-
