@@ -109,17 +109,20 @@ class FingeringPipeline:
         
         logger.info(f"Detected {len(keyboard_region.key_boundaries)} keys")
         
-        # Initialize finger assigner with detected keyboard
+        # Project key boundaries to pixel space (avoids parallax warp on hands)
+        kb_px = self._project_keys_to_pixel_space(
+            keyboard_region.key_boundaries, keyboard_region.homography
+        )
+
         self.finger_assigner = GaussianFingerAssigner(
-            keyboard_region.key_boundaries,
+            kb_px,
             sigma=self.config.assignment.sigma,
             candidate_range=self.config.assignment.candidate_keys
         )
         
-        # Set keyboard center for hand separation
-        x_min = min(kb[0] for kb in keyboard_region.key_boundaries.values())
-        x_max = max(kb[2] for kb in keyboard_region.key_boundaries.values())
-        self.hand_separator.set_keyboard_center((x_min + x_max) / 2)
+        # Set keyboard center for hand separation (pixel space)
+        key_cx = sorted(self.finger_assigner.key_centers.values(), key=lambda c: c[0])
+        self.hand_separator.set_keyboard_center(key_cx[len(key_cx) // 2][0])
         
         # Stage 2: Hand Processing
         logger.info("Stage 2: Hand Processing")
@@ -135,6 +138,15 @@ class FingeringPipeline:
         if right_landmarks.size > 0:
             right_landmarks = self.temporal_filter.process(right_landmarks)
             logger.info(f"Right hand: {len(right_landmarks)} frames")
+        
+        # Scale landmarks from [0,1] to pixel space (no homography warp)
+        frame_w, frame_h = 1920, 1080  # PianoVAM resolution
+        if left_landmarks.size > 0:
+            left_landmarks[:, :, 0] *= frame_w
+            left_landmarks[:, :, 1] *= frame_h
+        if right_landmarks.size > 0:
+            right_landmarks[:, :, 0] *= frame_w
+            right_landmarks[:, :, 1] *= frame_h
         
         # Stage 3: Finger Assignment
         logger.info("Stage 3: Finger Assignment")
@@ -176,6 +188,23 @@ class FingeringPipeline:
         
         return assignments
     
+    @staticmethod
+    def _project_keys_to_pixel_space(key_boundaries_warped, homography):
+        """Project key bounding boxes from warped space to pixel space."""
+        H_inv = np.linalg.inv(homography)
+        result = {}
+        for k, (x1, y1, x2, y2) in key_boundaries_warped.items():
+            cy = (y1 + y2) / 2.0
+            pts_w = np.array([[x1, cy, 1.0],
+                              [x2, cy, 1.0],
+                              [(x1 + x2) / 2.0, cy, 1.0]], dtype=np.float64)
+            pts_p = (H_inv @ pts_w.T).T
+            pts_p = pts_p[:, :2] / pts_p[:, 2:3]
+            lx, rx = pts_p[0, 0], pts_p[1, 0]
+            cy_px = pts_p[2, 1]
+            result[k] = (lx, cy_px - 5.0, rx, cy_px + 5.0)
+        return result
+
     def evaluate(
         self,
         predictions: List[FingerAssignment],
