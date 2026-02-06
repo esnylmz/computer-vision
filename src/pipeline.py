@@ -149,6 +149,9 @@ class FingeringPipeline:
             right_landmarks[:, :, 1] *= frame_h
         
         # Stage 3: Finger Assignment
+        # Try BOTH hands for every key, pick the one with higher confidence.
+        # The max-distance gate inside the assigner returns None when the
+        # hand is clearly not near the key, preventing false assignments.
         logger.info("Stage 3: Finger Assignment")
         synced_events = self.midi_sync.sync_events(midi_events)
         logger.info(f"Synced {len(synced_events)} MIDI events")
@@ -159,30 +162,30 @@ class FingeringPipeline:
             frame_idx = event.frame_idx
             key_idx = event.key_idx
             
-            # Determine which hand to use
-            key_center = self.finger_assigner.key_centers.get(key_idx)
-            if key_center is None:
+            if key_idx not in self.finger_assigner.key_centers:
                 continue
             
-            # Try right hand first, then left
-            assignment = None
-            
+            # Try both hands
+            asgn_r = None
             if frame_idx < len(right_landmarks):
-                landmarks = right_landmarks[frame_idx]
-                if not np.any(np.isnan(landmarks)):
-                    assignment = self.finger_assigner.assign_from_landmarks(
-                        landmarks, key_idx, 'right', frame_idx, event.onset_time
+                lm = right_landmarks[frame_idx]
+                if not np.any(np.isnan(lm)):
+                    asgn_r = self.finger_assigner.assign_from_landmarks(
+                        lm, key_idx, 'right', frame_idx, event.onset_time
                     )
             
-            if assignment is None and frame_idx < len(left_landmarks):
-                landmarks = left_landmarks[frame_idx]
-                if not np.any(np.isnan(landmarks)):
-                    assignment = self.finger_assigner.assign_from_landmarks(
-                        landmarks, key_idx, 'left', frame_idx, event.onset_time
+            asgn_l = None
+            if frame_idx < len(left_landmarks):
+                lm = left_landmarks[frame_idx]
+                if not np.any(np.isnan(lm)):
+                    asgn_l = self.finger_assigner.assign_from_landmarks(
+                        lm, key_idx, 'left', frame_idx, event.onset_time
                     )
             
-            if assignment:
-                assignments.append(assignment)
+            # Pick the better assignment (higher raw Gaussian confidence)
+            cands = [a for a in (asgn_r, asgn_l) if a is not None]
+            if cands:
+                assignments.append(max(cands, key=lambda a: a.confidence))
         
         logger.info(f"Assigned fingers to {len(assignments)} notes")
         

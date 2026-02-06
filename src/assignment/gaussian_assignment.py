@@ -7,6 +7,18 @@ is used because, in a top-down piano view, the y-axis measures depth into the
 keyboard – a dimension that varies systematically with finger length and
 introduces a strong bias towards shorter fingers (thumb).
 
+Key design decisions
+--------------------
+1. **x-only distance** – avoids y-bias from finger-length differences.
+2. **Max-distance gate** – if the closest fingertip is farther than
+   ``max_distance_sigma × σ`` from the key centre the assignment is
+   rejected (returns *None*).  This prevents garbage assignments when
+   the hand is not near the key (e.g. other hand should be used).
+3. **Raw confidence** – the returned ``confidence`` is the *raw* Gaussian
+   probability of the best finger, NOT normalised across fingers.
+   This gives a physically meaningful value: 1.0 at the key centre,
+   ~0.61 at 1σ, ~0.14 at 2σ, etc.
+
 Based on Moryossef et al. (2023) "At Your Fingertips" methodology.
 
 Usage:
@@ -30,7 +42,7 @@ class FingerAssignment:
     key_idx: int               # Piano key index (0-87)
     assigned_finger: int       # 1-5 (thumb to pinky)
     hand: str                  # 'left' or 'right'
-    confidence: float          # Assignment probability
+    confidence: float          # Raw Gaussian probability of assigned finger
     fingertip_position: Tuple[float, float]  # (x, y) of assigned fingertip
     all_probabilities: Optional[Dict[int, float]] = None
 
@@ -53,14 +65,10 @@ class GaussianFingerAssigner:
     fingertips based on **horizontal (x) distance only**, then selects the
     maximum-likelihood finger.
 
-    Why x-only?
-    -----------
-    In the keyboard-homography space the key centres sit at the vertical
-    midpoint of the key bounding box, while the fingertips are at the front
-    edge (close to the player).  The resulting y-gap is ~50-100 px – far
-    larger than any x-difference – so 2-D distance is dominated by y and
-    the winner is determined by sub-pixel y-differences between fingers
-    (thumb, being anatomically shorter, always wins).
+    A key safety mechanism is the **max-distance gate**: when the closest
+    fingertip is more than ``max_distance_sigma × σ`` away from the key
+    centre, the method returns *None* instead of an unreliable assignment.
+    This allows the caller to fall back to the other hand or skip the note.
 
     Sigma auto-scales to the average white-key width when not set explicitly,
     ensuring resolution-independent behaviour.
@@ -84,20 +92,26 @@ class GaussianFingerAssigner:
         key_boundaries: Dict[int, Tuple[int, int, int, int]],
         sigma: Optional[float] = None,
         candidate_range: int = 2,
-        min_confidence: float = 0.01
+        min_confidence: float = 0.01,
+        max_distance_sigma: float = 4.0
     ):
         """
         Args:
-            key_boundaries: Dict mapping key index to (x1, y1, x2, y2) bbox
+            key_boundaries: Dict mapping key index to (x1, y1, x2, y2) bbox.
             sigma: Gaussian spread in pixels (x-axis).  If *None* it is
                    automatically set to the mean white-key width.
-            candidate_range: Number of adjacent keys to consider (±N)
-            min_confidence: Minimum normalised probability for a valid
-                            assignment
+            candidate_range: Number of adjacent keys to consider (±N).
+            min_confidence: Minimum *raw* Gaussian probability for a valid
+                            assignment.
+            max_distance_sigma: Maximum allowed distance (in units of σ)
+                                between the closest fingertip and the key
+                                centre.  Assignments exceeding this are
+                                rejected.  Default 4.0 (≈ 4 key widths).
         """
         self.key_boundaries = key_boundaries
         self.candidate_range = candidate_range
         self.min_confidence = min_confidence
+        self.max_distance_sigma = max_distance_sigma
 
         # Pre-compute key centres
         self.key_centers: Dict[int, Tuple[float, float]] = {}
@@ -110,6 +124,9 @@ class GaussianFingerAssigner:
         else:
             widths = [float(x2 - x1) for x1, y1, x2, y2 in key_boundaries.values()]
             self.sigma = float(np.mean(widths)) if widths else 15.0
+
+        # Pre-compute the absolute distance threshold in pixels
+        self.max_distance_px = self.max_distance_sigma * self.sigma
 
     # ------------------------------------------------------------------
     # Core probability computation
@@ -144,35 +161,54 @@ class GaussianFingerAssigner:
         """
         Assign a finger to a pressed key.
 
+        Returns *None* when:
+        - The key index is unknown.
+        - No fingertip data is available.
+        - The closest fingertip is farther than ``max_distance_px`` from
+          the key centre (hand is not at this key).
+        - The best raw probability is below ``min_confidence``.
+
         Args:
-            fingertips: Dict mapping finger number (1-5) to (x, y)
-            pressed_key_idx: Key index (0-87)
-            hand: 'left' or 'right'
+            fingertips: Dict mapping finger number (1-5) to (x, y).
+            pressed_key_idx: Key index (0-87).
+            hand: 'left' or 'right'.
         """
         if pressed_key_idx not in self.key_centers or not fingertips:
             return None
 
         key_center = self.key_centers[pressed_key_idx]
 
-        # Compute raw probabilities
-        probabilities: Dict[int, float] = {}
+        # Compute raw Gaussian probabilities and x-distances
+        raw_probs: Dict[int, float] = {}
+        x_distances: Dict[int, float] = {}
         for finger_num, pos in fingertips.items():
             if pos is not None:
-                probabilities[finger_num] = self.compute_probability(pos, key_center)
+                dx = abs(pos[0] - key_center[0])
+                x_distances[finger_num] = dx
+                raw_probs[finger_num] = float(
+                    np.exp(-dx ** 2 / (2.0 * self.sigma ** 2))
+                )
 
-        if not probabilities:
+        if not raw_probs:
             return None
 
-        # Normalise
-        total = sum(probabilities.values())
-        if total > 0:
-            probabilities = {k: v / total for k, v in probabilities.items()}
-
-        best_finger = max(probabilities, key=probabilities.get)
-        best_prob = probabilities[best_finger]
-
-        if best_prob < self.min_confidence:
+        # --- Max-distance gate ---
+        # If the closest fingertip is too far, this hand is not at this key.
+        min_dx = min(x_distances.values())
+        if min_dx > self.max_distance_px:
             return None
+
+        # Pick the finger with the highest raw probability
+        best_finger = max(raw_probs, key=raw_probs.get)
+        best_raw_prob = raw_probs[best_finger]
+
+        if best_raw_prob < self.min_confidence:
+            return None
+
+        # Normalised probabilities (for the all_probabilities field only)
+        total = sum(raw_probs.values())
+        norm_probs = ({k: v / total for k, v in raw_probs.items()}
+                      if total > 0 else raw_probs)
 
         return FingerAssignment(
             note_onset=onset_time,
@@ -181,9 +217,9 @@ class GaussianFingerAssigner:
             key_idx=pressed_key_idx,
             assigned_finger=best_finger,
             hand=hand,
-            confidence=best_prob,
+            confidence=best_raw_prob,            # RAW probability – not normalised
             fingertip_position=fingertips[best_finger],
-            all_probabilities=probabilities
+            all_probabilities=norm_probs
         )
 
     # ------------------------------------------------------------------
