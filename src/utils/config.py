@@ -13,6 +13,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
+from typing import Optional as Opt
 
 
 @dataclass
@@ -42,7 +43,7 @@ class HandConfig:
 @dataclass
 class AssignmentConfig:
     """Finger assignment configuration."""
-    sigma: float = 15.0
+    sigma: Opt[float] = None  # None → auto-scale to mean key width
     candidate_keys: int = 2
     hand_separation_threshold: float = 0.5
 
@@ -127,7 +128,7 @@ class Config:
         # Assignment config
         assignment = config_dict.get('assignment', {})
         config.assignment = AssignmentConfig(
-            sigma=assignment.get('sigma', 15.0),
+            sigma=assignment.get('sigma', None),  # None → auto-scale
             candidate_keys=assignment.get('candidate_keys', 2),
             hand_separation_threshold=assignment.get('hand_separation_threshold', 0.5)
         )

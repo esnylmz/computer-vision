@@ -34,7 +34,7 @@ hand:
     savgol_order: 3
 
 assignment:
-  sigma: 20.0
+  sigma: null  # Auto-scale to mean key width (x-only distance)
   candidate_keys: 2
   hand_separation_threshold: 0.5
 
