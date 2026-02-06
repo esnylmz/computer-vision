@@ -31,7 +31,7 @@ hand:
     savgol_order: 3
 
 assignment:
-  sigma: 15.0  # Gaussian spread in pixels
+  sigma: 20.0  # Gaussian spread in pixels
   candidate_keys: 2  # ±N keys to consider
   hand_separation_threshold: 0.5  # Normalized x-coordinate
 

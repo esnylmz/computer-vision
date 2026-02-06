@@ -34,7 +34,7 @@ hand:
     savgol_order: 3
 
 assignment:
-  sigma: 15.0
+  sigma: 20.0
   candidate_keys: 2
   hand_separation_threshold: 0.5
 

@@ -70,16 +70,17 @@ class GaussianFingerAssigner:
         20: 5   # Pinky
     }
     
-    # Inverse mapping
+    # Inverse mapping  (default MediaPipe tip landmarks)
     LANDMARK_FROM_FINGER = {1: 4, 2: 8, 3: 12, 4: 16, 5: 20}
     
     def __init__(
         self,
         key_boundaries: Dict[int, Tuple[int, int, int, int]],
-        sigma: float = 15.0,
+        sigma: float = 20.0,
         candidate_range: int = 2,
         min_confidence: float = 0.01,
-        x_only: bool = True
+        x_only: bool = False,
+        thumb_landmark: int = 3
     ):
         """
         Args:
@@ -87,15 +88,21 @@ class GaussianFingerAssigner:
             sigma: Standard deviation for Gaussian (pixels)
             candidate_range: Number of adjacent keys to consider (±N)
             min_confidence: Minimum confidence for valid assignment
-            x_only: If True, use only x-distance for probability (recommended
-                     for top-down piano view where y measures depth into the
-                     keyboard and does NOT discriminate between fingers)
+            x_only: If True, use only x-distance for probability
+            thumb_landmark: MediaPipe landmark index to use for the thumb.
+                Default 3 (IP joint) instead of 4 (tip) because the thumb
+                tip extends sideways along the keyboard in top-down view,
+                giving it a systematic distance advantage over other fingers.
+                The IP joint better represents the key-contact position.
         """
         self.key_boundaries = key_boundaries
         self.sigma = sigma
         self.candidate_range = candidate_range
         self.min_confidence = min_confidence
         self.x_only = x_only
+        
+        # Per-instance landmark map (allows custom thumb landmark)
+        self._landmark_map = {1: thumb_landmark, 2: 8, 3: 12, 4: 16, 5: 20}
         
         # Precompute key centers
         self.key_centers = {}
@@ -215,7 +222,7 @@ class GaussianFingerAssigner:
         """
         # Extract fingertips from landmarks
         fingertips = {}
-        for finger_num, lm_idx in self.LANDMARK_FROM_FINGER.items():
+        for finger_num, lm_idx in self._landmark_map.items():
             if lm_idx < len(landmarks) and not np.any(np.isnan(landmarks[lm_idx])):
                 fingertips[finger_num] = (float(landmarks[lm_idx, 0]), 
                                          float(landmarks[lm_idx, 1]))
