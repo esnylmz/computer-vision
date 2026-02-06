@@ -78,7 +78,8 @@ class GaussianFingerAssigner:
         key_boundaries: Dict[int, Tuple[int, int, int, int]],
         sigma: float = 15.0,
         candidate_range: int = 2,
-        min_confidence: float = 0.01
+        min_confidence: float = 0.01,
+        x_only: bool = True
     ):
         """
         Args:
@@ -86,11 +87,15 @@ class GaussianFingerAssigner:
             sigma: Standard deviation for Gaussian (pixels)
             candidate_range: Number of adjacent keys to consider (±N)
             min_confidence: Minimum confidence for valid assignment
+            x_only: If True, use only x-distance for probability (recommended
+                     for top-down piano view where y measures depth into the
+                     keyboard and does NOT discriminate between fingers)
         """
         self.key_boundaries = key_boundaries
         self.sigma = sigma
         self.candidate_range = candidate_range
         self.min_confidence = min_confidence
+        self.x_only = x_only
         
         # Precompute key centers
         self.key_centers = {}
@@ -112,10 +117,16 @@ class GaussianFingerAssigner:
         Returns:
             Probability value
         """
-        distance = np.sqrt(
-            (fingertip[0] - key_center[0])**2 + 
-            (fingertip[1] - key_center[1])**2
-        )
+        if self.x_only:
+            # Use horizontal distance only — in a top-down piano view the
+            # y-axis measures depth into the keyboard, which is the same for
+            # all fingers and would bias toward the thumb (shorter digit).
+            distance = abs(fingertip[0] - key_center[0])
+        else:
+            distance = np.sqrt(
+                (fingertip[0] - key_center[0])**2 + 
+                (fingertip[1] - key_center[1])**2
+            )
         return np.exp(-distance**2 / (2 * self.sigma**2))
     
     def assign_finger(
