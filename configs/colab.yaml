@@ -1,0 +1,61 @@
+# Colab-specific Configuration
+# Optimized for Google Colab free tier (T4 GPU, ~12GB RAM)
+
+project:
+  name: "piano-fingering-detection"
+  version: "1.0.0"
+
+data:
+  dataset_name: "PianoVAM/PianoVAM_v1.0"
+  cache_dir: "/content/data/cache"
+  video_fps: 60
+  audio_sample_rate: 44100
+  # Limit samples for quick testing
+  max_samples_debug: 5
+
+keyboard:
+  num_keys: 88
+  num_white_keys: 52
+  aspect_ratio: 8.147
+  detection:
+    canny_low: 50
+    canny_high: 150
+    hough_threshold: 100
+    min_line_length: 100
+
+hand:
+  num_landmarks: 21
+  fingertip_indices: [4, 8, 12, 16, 20]
+  filtering:
+    hampel_window: 20
+    hampel_threshold: 3.0
+    interpolation_max_gap: 30
+    savgol_window: 11
+    savgol_order: 3
+
+assignment:
+  sigma: null  # Auto-scale to mean key width (x-only distance)
+  candidate_keys: 2
+  hand_separation_threshold: 0.5
+
+refinement:
+  model:
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.3
+    bidirectional: true
+  training:
+    batch_size: 16  # Smaller batch for Colab memory
+    learning_rate: 0.001
+    epochs: 30  # Fewer epochs for Colab runtime limits
+    early_stopping_patience: 5
+
+evaluation:
+  metrics: ["accuracy", "m_gen", "m_high", "ifr"]
+
+# Colab-specific paths
+paths:
+  output_dir: "/content/outputs"
+  checkpoint_dir: "/content/checkpoints"
+  visualization_dir: "/content/visualizations"
+
