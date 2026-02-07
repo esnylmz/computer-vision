@@ -4,7 +4,23 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-1.12+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A computer vision system that automatically detects piano fingering (which finger plays each note) from video recordings. Developed as a Computer Vision final project at Sapienza University of Rome.
+A **full computer vision** system that automatically detects piano fingering (which finger plays each note) from video recordings. The pipeline uses **no manual annotations** during detection — only classical CV and learned models. Developed as a Computer Vision final project at Sapienza University of Rome.
+
+## Primary Reference
+
+> **Moryossef et al. (2023)** — *"At Your Fingertips: Extracting Piano Fingering Instructions from Videos"* — [arXiv:2303.03745](https://arxiv.org/abs/2303.03745)
+
+Our pipeline directly implements the methodology from this paper:
+
+| Paper Methodology | Our Implementation |
+|---|---|
+| Video-based pipeline (Video → Keyboard → Hands → Assignment) | Same 4-stage architecture |
+| Keyboard detection from video via edge/line analysis | Canny + Hough + line clustering + black-key contour analysis |
+| MediaPipe 21-keypoint hand pose estimation | Live detection + PianoVAM pre-extracted skeletons |
+| **Gaussian probability assignment using x-distance only** | `P(finger→key) = exp(−dx²/2σ²)` with auto-scaled σ |
+| Max-distance gate (reject when hand is far from key) | 4σ rejection threshold |
+| Both-hands evaluation per note | Try L & R, pick higher confidence |
+| Temporal smoothing of landmarks | Hampel + interpolation + Savitzky-Golay |
 
 ## Project Goal
 
@@ -15,21 +31,23 @@ Given a video of piano performance with synchronized MIDI data, automatically de
 ## Pipeline Architecture
 
 ```
-Video → Keyboard Detection → Hand Processing → Finger-Key Assignment → Neural Refinement → Fingering Labels
-         (Canny/Hough/        (MediaPipe)       (Gaussian Prob.)         (BiLSTM)
-          Clustering)
+Video ──► Keyboard Detection ──► Hand Processing ──► Finger-Key Assignment ──► Neural Refinement ──► Labels
+           (Canny/Hough/           (MediaPipe +        (Gaussian x-only          (BiLSTM +
+            Clustering)             Temporal Filter)     Probability)              Viterbi)
 ```
 
 | Stage | Method | Input | Output |
 |-------|--------|-------|--------|
-| 1. Keyboard Detection | Canny + Hough + Line Clustering + Black-Key Analysis | Video frames | 88 key bounding boxes |
+| 1. Keyboard Detection | Canny + Hough + Clustering + Black-Key Analysis | Video frames | 88 key bounding boxes (pixel space) |
 | 2. Hand Processing | Hampel + SavGol filters | MediaPipe skeleton JSON | Filtered landmarks (T × 21 × 3) |
 | 3. Finger Assignment | Gaussian probability (x-only) | MIDI events + fingertips + keys | FingerAssignment per note |
 | 4. Neural Refinement | BiLSTM + Attention + Viterbi | Initial assignments | Refined predictions |
 
-### Stage 1: Keyboard Detection
+> **Full-CV approach**: No dataset annotations are used during detection. Corner annotations from PianoVAM are used **only for evaluation** (IoU metric).
 
-Automatic keyboard detection from raw video using classical computer vision:
+### Stage 1: Keyboard Detection (Automatic — No Annotations)
+
+The keyboard is detected **automatically** from raw video using classical computer vision:
 
 1. **Preprocessing** — CLAHE contrast enhancement + Gaussian blur
 2. **Canny edge detection** — Otsu-adaptive thresholds merged with fixed thresholds
@@ -38,9 +56,9 @@ Automatic keyboard detection from raw video using classical computer vision:
 5. **Line clustering** — groups nearby horizontal lines by y-coordinate, selects top/bottom pair with plausible aspect ratio
 6. **Black-key segmentation** — threshold + contour analysis to refine x-boundaries
 7. **Multi-frame consensus** — samples N frames, takes median bounding box for robustness
-8. **Homography + 88-key layout** — computes perspective transform and maps all keys to pixel space
+8. **88-key layout** — divides detected region into 52 white + 36 black keys directly in pixel space
 
-When PianoVAM corner annotations are available, they serve as ground truth for evaluating auto-detection accuracy (IoU).
+Corner annotations from PianoVAM serve **only** as ground truth for measuring detection accuracy via IoU (Intersection-over-Union).
 
 ### Stage 2: Hand Processing
 
@@ -49,9 +67,15 @@ Loads pre-extracted MediaPipe 21-keypoint hand skeletons from the PianoVAM datas
 2. **Linear interpolation** — fills gaps shorter than 30 frames
 3. **Savitzky-Golay filter** (window=11, order=3) — smoothing
 
-### Stage 3: Finger-Key Assignment
+### Stage 3: Finger-Key Assignment (Moryossef et al. 2023)
 
-Synchronizes MIDI note events with video frames. Computes Gaussian probability over all five fingertips using **x-distance only** (avoids y-bias from finger-length differences in top-down view). Both hands are evaluated for every note; the higher-confidence assignment wins. A max-distance gate rejects assignments when the hand is clearly not near the key.
+Synchronizes MIDI note events with video frames. Following the core methodology of Moryossef et al. (2023), computes Gaussian probability over all five fingertips using **x-distance only**:
+
+```
+P(finger_i → key_k) = exp(−dx² / 2σ²)
+```
+
+The x-only design avoids the systematic y-bias caused by differing finger lengths in the top-down camera view. σ auto-scales to the mean white-key width. Both hands are evaluated for every note; the higher-confidence assignment wins. A max-distance gate (4σ) rejects assignments when the hand is clearly not near the key.
 
 ### Stage 4: Neural Refinement
 
@@ -81,13 +105,13 @@ This project uses the [PianoVAM dataset](https://huggingface.co/datasets/PianoVA
 |-----------|--------|
 | Project structure & configuration | ✅ Complete |
 | Dataset loader (`src/data/`) | ✅ Working — streams from HuggingFace |
-| Keyboard auto-detection (`src/keyboard/auto_detector.py`) | ✅ Working — Canny/Hough/clustering with multi-frame consensus |
-| Keyboard corner-based detection (`src/keyboard/detector.py`) | ✅ Working — serves as ground truth for IoU evaluation |
+| **Keyboard auto-detection** (`src/keyboard/auto_detector.py`) | ✅ **Primary method** — Canny/Hough/clustering, no annotations |
+| Corner-based detection (`src/keyboard/detector.py`) | ✅ Evaluation only — IoU ground truth |
 | Hand processing (`src/hand/`) | ✅ Working — temporal filtering applied |
-| Finger assignment (`src/assignment/`) | ✅ Working — Gaussian baseline produces assignments |
-| Neural refinement (`src/refinement/`) | ✅ Code complete — BiLSTM + Viterbi implemented |
-| Evaluation metrics (`src/evaluation/`) | ✅ Code complete — IFR + keyboard IoU validated |
-| Main notebook | ✅ Complete end-to-end pipeline |
+| Finger assignment (`src/assignment/`) | ✅ Working — Gaussian x-only (Moryossef et al.) |
+| Neural refinement (`src/refinement/`) | ✅ Code complete — BiLSTM + Viterbi |
+| Evaluation metrics (`src/evaluation/`) | ✅ Code complete — IFR + keyboard IoU |
+| Main notebook | ✅ Full-CV end-to-end pipeline |
 
 **Known limitations:**
 - The BiLSTM is currently trained on the Gaussian baseline's own outputs (self-supervised), not ground-truth finger labels.
@@ -173,10 +197,10 @@ computer-vision/
 ## Key References
 
 1. **Moryossef et al. (2023)** — *"At Your Fingertips: Extracting Piano Fingering Instructions from Videos"* — [arXiv:2303.03745](https://arxiv.org/abs/2303.03745)
-   Primary methodological basis. Our Gaussian finger-key assignment, x-only distance metric, and video-based pipeline architecture follow this paper.
+   **Primary methodological basis.** Our entire pipeline architecture, Gaussian x-only finger-key assignment, max-distance gate, and both-hands evaluation follow this paper directly.
 
 2. **Kim et al. (2025)** — *"PianoVAM: A Multimodal Piano Performance Dataset"* — ISMIR 2025
-   Provides the dataset: 107 synchronized video/audio/MIDI recordings with pre-extracted hand skeletons and keyboard corner annotations.
+   Provides the dataset (107 recordings). Corner annotations are used **only for evaluation**, not detection.
 
 3. **Ramoneda et al. (2022)** — *"Automatic Piano Fingering from Partially Annotated Scores using Graph Neural Networks"* — ACM Multimedia 2022
    Inspires the neural refinement stage. Their ArGNN approach informs our BiLSTM sequence modeling for temporal fingering consistency.

@@ -12,14 +12,14 @@
 | Dataset Loader | `src/data/dataset.py` | ✅ Working — streams metadata from HuggingFace, downloads files on demand |
 | MIDI Utilities | `src/data/midi_utils.py` | ✅ Working |
 | Video Utilities | `src/data/video_utils.py` | ✅ Working |
-| Auto Keyboard Detector | `src/keyboard/auto_detector.py` | ✅ Working — Canny/Hough/clustering with multi-frame consensus |
-| Corner-based Detector | `src/keyboard/detector.py` | ✅ Working — corner annotations → 88 keys |
+| **Auto Keyboard Detector** | `src/keyboard/auto_detector.py` | ✅ **Primary method** — Canny/Hough/clustering, no annotations used |
+| Corner-based Detector | `src/keyboard/detector.py` | ✅ Evaluation only — IoU ground truth |
 | Key Localization | `src/keyboard/key_localization.py` | ✅ Working — 52 white + 36 black keys |
 | Homography | `src/keyboard/homography.py` | ✅ Working |
 | Skeleton Loader | `src/hand/skeleton_loader.py` | ✅ Working — parses PianoVAM JSON format |
 | Temporal Filter | `src/hand/temporal_filter.py` | ✅ Working — Hampel + interpolation + SavGol |
 | Fingertip Extractor | `src/hand/fingertip_extractor.py` | ✅ Working |
-| Gaussian Assignment | `src/assignment/gaussian_assignment.py` | ✅ Working — x-only distance, max-distance gate |
+| Gaussian Assignment | `src/assignment/gaussian_assignment.py` | ✅ Working — x-only distance, Moryossef et al. (2023) methodology |
 | MIDI Sync | `src/assignment/midi_sync.py` | ✅ Working |
 | Hand Separation | `src/assignment/hand_separation.py` | ✅ Working — both-hands-try strategy |
 | BiLSTM Model | `src/refinement/model.py` | ✅ Code complete |
@@ -43,15 +43,15 @@
 
 ## What Works End-to-End
 
-The following pipeline runs successfully on PianoVAM data in Google Colab:
+The following **full-CV pipeline** runs successfully on PianoVAM data in Google Colab — **no annotations used during detection**:
 
 1. Load metadata from HuggingFace (no bulk download needed)
 2. Download video + skeleton JSON + TSV annotations per sample
-3. **Automatically detect keyboard** from video frames (Canny/Hough/clustering)
-4. Evaluate auto-detection against corner annotations (IoU metric)
+3. **Automatically detect keyboard** from video (Canny/Hough/clustering — no corner annotations)
+4. Evaluate auto-detection against corner annotations (IoU — **evaluation only**)
 5. Load & filter hand landmarks → smooth (T × 21 × 3) arrays
 6. Synchronize MIDI events with video frames
-7. Assign fingers using Gaussian probability (both hands tried per note)
+7. Assign fingers using Gaussian x-only probability (Moryossef et al. 2023 — both hands tried per note)
 8. Train BiLSTM refinement model (self-supervised)
 9. Apply constrained Viterbi decoding
 10. Evaluate IFR on train and test splits

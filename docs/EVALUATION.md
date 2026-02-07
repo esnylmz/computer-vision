@@ -4,13 +4,13 @@
 
 ### 1. Keyboard Detection IoU
 
-Intersection-over-Union between the automatically detected keyboard bounding box and the corner-annotation ground truth.
+Intersection-over-Union between the **automatically detected** keyboard bounding box (Canny/Hough/clustering — no annotations used) and the corner-annotation ground truth (used **only here** for evaluation).
 
 ```
 IoU = Area(Intersection) / Area(Union)
 ```
 
-Evaluated per-sample and aggregated (mean, median) across the dataset. Tests the Canny/Hough detection pipeline independently.
+Evaluated per-sample and aggregated (mean, median) across the dataset. Tests the automatic CV detection pipeline independently of the rest of the system.
 
 ### 2. IFR (Irrational Fingering Rate)
 

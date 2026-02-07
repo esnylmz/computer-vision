@@ -24,11 +24,11 @@ The pipeline detects piano fingering from video in four stages. Each stage has a
 
 ---
 
-## Stage 1: Keyboard Detection
+## Stage 1: Keyboard Detection (Automatic — No Annotations)
 
 **Module**: `src/keyboard/` — primary class: `AutoKeyboardDetector` in `auto_detector.py`
 
-**Goal**: Automatically detect the piano keyboard from raw video frames and map 88 keys to pixel-space bounding boxes.
+**Goal**: Automatically detect the piano keyboard from raw video frames and map 88 keys to pixel-space bounding boxes **using only computer vision**. No dataset annotations are used in the detection pipeline — this is the full-CV approach.
 
 ### Automatic Detection Pipeline (Canny + Hough + Clustering)
 
@@ -44,22 +44,16 @@ The pipeline detects piano fingering from video in four stages. Each stage has a
    - Spans at least 25% of the frame width
    - Maximises `width_fraction × evidence_count`
 7. **Black-key refinement** — Within the candidate ROI: threshold to binary → morphological open/close → find contours → filter by aspect ratio, size, and position → tighten x-boundaries using the black-key extents
-8. **Homography + 88-key layout** — Compute perspective transform from bounding box corners and divide into 52 white + 36 black keys
+8. **88-key layout** — Divide detected bounding box into 52 white + 36 black keys directly in pixel space (no inverse homography needed)
 
 **Multi-frame consensus** (`AutoKeyboardDetector.detect_from_video`):
 - Sample N frames evenly across the video (default 7)
 - Run single-frame detection on each
 - Take the **median** of all valid bounding boxes for robustness against temporary occlusions (hands, page turns)
 
-### Corner-based Detection (Ground Truth)
+### Corner Annotations (Evaluation Only)
 
-When PianoVAM corner annotations are available (`Point_LT`, `Point_RT`, `Point_RB`, `Point_LB`):
-1. Parse 4-point corner coordinates
-2. Compute homography matrix for perspective normalization
-3. Divide the warped keyboard rectangle into 88 keys
-4. Project key boundaries back to pixel space (inverse homography)
-
-This serves as ground truth for evaluating the automatic detection via **IoU** (Intersection-over-Union).
+PianoVAM corner annotations (`Point_LT`, `Point_RT`, `Point_RB`, `Point_LB`) are **not used** in the detection pipeline. They serve solely as ground truth for computing **IoU** (Intersection-over-Union) to evaluate the quality of automatic detection.
 
 ### Evaluation
 
@@ -215,6 +209,6 @@ assignments = pipeline.process_sample(
     video_path='video.mp4',
     skeleton_data=skeleton_dict,
     midi_events=midi_list,
-    keyboard_corners=corners_dict
+    keyboard_corners=corners_dict  # optional — used only for IoU evaluation
 )
 ```

@@ -86,53 +86,44 @@ class FingeringPipeline:
         keyboard_corners: Optional[Dict] = None
     ) -> List[FingerAssignment]:
         """
-        Process a single sample through the pipeline.
+        Process a single sample through the full-CV pipeline.
+        
+        The keyboard is detected **automatically** from video using
+        Canny/Hough/clustering — no dataset annotations are used in the
+        pipeline itself.  Corner annotations, when provided, are used
+        **only for IoU evaluation** of the auto-detection quality.
         
         Args:
             video_path: Path to video file
             skeleton_data: Hand skeleton data
             midi_events: MIDI note events
-            keyboard_corners: Optional keyboard corner annotations
+            keyboard_corners: Optional corner annotations (evaluation only)
             
         Returns:
             List of finger assignments
         """
-        # Stage 1: Keyboard Detection
-        logger.info("Stage 1: Keyboard Detection")
+        # Stage 1: Automatic Keyboard Detection (full CV — no annotations)
+        logger.info("Stage 1: Automatic Keyboard Detection")
 
-        # Always attempt automatic Canny/Hough detection from video
-        auto_result: Optional[AutoDetectionResult] = None
-        if video_path:
-            logger.info("  Running automatic Canny/Hough detection ...")
-            auto_result = self.auto_keyboard_detector.detect_from_video(video_path)
-            if auto_result.success:
-                logger.info(f"  Auto-detection succeeded (bbox={auto_result.consensus_bbox})")
-            else:
-                logger.info("  Auto-detection did not produce a result")
-
-        # Determine which keyboard region to use for the rest of the pipeline
-        if keyboard_corners:
-            keyboard_region = self.keyboard_detector.detect_from_corners(keyboard_corners)
-            logger.info("  Using corner annotations for key layout")
-            # Evaluate auto-detection against GT when both are available
-            if auto_result is not None and auto_result.success:
-                iou = self.auto_keyboard_detector.evaluate_against_corners(
-                    auto_result, keyboard_corners
-                )
-                logger.info(f"  Auto-detect vs corner-GT IoU = {iou:.3f}")
-        elif auto_result is not None and auto_result.success:
+        auto_result = self.auto_keyboard_detector.detect_from_video(video_path)
+        if auto_result.success:
             keyboard_region = auto_result.keyboard_region
-            logger.info("  Using auto-detected keyboard (no corner annotations)")
+            logger.info(f"  Auto-detection succeeded (bbox={auto_result.consensus_bbox})")
         else:
-            logger.error("Keyboard detection failed — no corners and auto-detect failed")
+            logger.error("Keyboard auto-detection failed")
             return []
+
+        # Evaluate against corner annotations if available (evaluation only)
+        if keyboard_corners:
+            iou = self.auto_keyboard_detector.evaluate_against_corners(
+                auto_result, keyboard_corners
+            )
+            logger.info(f"  IoU vs corner annotations (eval): {iou:.3f}")
         
         logger.info(f"Detected {len(keyboard_region.key_boundaries)} keys")
         
-        # Project key boundaries to pixel space (avoids parallax warp on hands)
-        kb_px = self._project_keys_to_pixel_space(
-            keyboard_region.key_boundaries, keyboard_region.homography
-        )
+        # Auto-detected key boundaries are already in pixel space
+        kb_px = keyboard_region.key_boundaries
 
         self.finger_assigner = GaussianFingerAssigner(
             kb_px,
