@@ -1,15 +1,21 @@
 """
 src/teacher_labels.py — Group A teacher label generation.
 
-Group A uses annotations (TSV / MIDI, optionally skeleton JSON)
-to produce frame-level press / no-press labels.  These labels are
-used **only** for training Group B's CNN — never at inference time.
+Group A uses annotations (TSV / MIDI, hand skeleton JSON) with
+REFINED temporal filtering to produce high-quality frame-level
+press / no-press labels. These labels are used **only** for training
+Group B's CNN — never at inference time.
+
+Group A has BETTER landmarks than Group B because:
+  - Uses pre-extracted JSON skeletons (higher quality than raw MediaPipe)
+  - Applies sophisticated temporal filtering (Hampel + SavGol)
+  - This creates cleaner teacher signals for CNN training
 
 Usage:
-    from src.teacher_labels import generate_teacher_labels_for_video
+    from src.teacher_labels import generate_teacher_labels_groupA
 
-    labeled_df = generate_teacher_labels_for_video(
-        landmarks_df, tsv_df, fps=60, clip_duration=20,
+    labeled_df = generate_teacher_labels_groupA(
+        video_id, dataset, tsv_df, fps=60, clip_duration=20,
     )
 """
 
@@ -19,6 +25,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import savgol_filter
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -135,7 +142,184 @@ def smooth_labels(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Public entry point
+# Hampel filter for outlier removal
+# ═══════════════════════════════════════════════════════════════════
+
+def hampel_filter(
+    data: np.ndarray,
+    window_size: int = 20,
+    n_sigmas: float = 3.0,
+) -> np.ndarray:
+    """
+    Hampel filter for outlier detection and removal.
+    
+    Replaces outliers (> n_sigmas * MAD from median) with the median.
+    Applied per-dimension independently.
+    """
+    n = len(data)
+    filtered = data.copy()
+    half_window = window_size // 2
+    
+    for i in range(n):
+        start = max(0, i - half_window)
+        end = min(n, i + half_window + 1)
+        window = data[start:end]
+        
+        # Handle NaN
+        valid_mask = ~np.isnan(window)
+        if valid_mask.sum() < 3:
+            continue
+        
+        valid_window = window[valid_mask]
+        median = np.median(valid_window)
+        mad = np.median(np.abs(valid_window - median))
+        
+        if mad < 1e-8:
+            continue
+        
+        threshold = n_sigmas * 1.4826 * mad  # 1.4826 converts MAD to stdev
+        if np.abs(data[i] - median) > threshold:
+            filtered[i] = median
+    
+    return filtered
+
+
+def temporal_filter_landmarks(
+    landmarks: np.ndarray,
+    hampel_window: int = 20,
+    hampel_threshold: float = 3.0,
+    savgol_window: int = 11,
+    savgol_order: int = 3,
+    max_interpolation_gap: int = 30,
+) -> np.ndarray:
+    """
+    Apply Group A's refined temporal filtering pipeline.
+    
+    Args:
+        landmarks: (T, 21, 3) array (may contain NaN for missing frames)
+        hampel_window: Window size for Hampel filter
+        hampel_threshold: Number of MADs for outlier detection
+        savgol_window: Window for Savitzky-Golay smoothing
+        savgol_order: Polynomial order for SavGol
+        max_interpolation_gap: Maximum frames to interpolate
+    
+    Returns:
+        Filtered (T, 21, 3) array
+    """
+    T, num_landmarks, dim = landmarks.shape
+    filtered = landmarks.copy()
+    
+    # Process each landmark independently
+    for lm_idx in range(num_landmarks):
+        for d in range(dim):
+            series = landmarks[:, lm_idx, d]
+            
+            # 1. Hampel filter (outlier removal)
+            series = hampel_filter(series, hampel_window, hampel_threshold)
+            
+            # 2. Interpolate small gaps
+            valid_mask = ~np.isnan(series)
+            if valid_mask.sum() < 2:
+                continue
+            
+            valid_indices = np.where(valid_mask)[0]
+            for i in range(len(valid_indices) - 1):
+                start = valid_indices[i]
+                end = valid_indices[i + 1]
+                gap = end - start - 1
+                
+                if gap > 0 and gap <= max_interpolation_gap:
+                    series[start:end] = np.linspace(
+                        series[start], series[end], gap + 2
+                    )[1:-1]
+            
+            # 3. Savitzky-Golay smoothing (only on valid data)
+            valid_mask = ~np.isnan(series)
+            if valid_mask.sum() >= savgol_window:
+                try:
+                    smoothed = savgol_filter(
+                        series[valid_mask], savgol_window, savgol_order,
+                    )
+                    series[valid_mask] = smoothed
+                except:
+                    pass  # Keep original if SavGol fails
+            
+            filtered[:, lm_idx, d] = series
+    
+    return filtered
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Group A landmark loading with refinement
+# ═══════════════════════════════════════════════════════════════════
+
+def load_and_refine_skeleton(
+    dataset,
+    video_id: str,
+    clip_duration: float,
+    fps: float,
+    frame_step: int = 1,
+) -> pd.DataFrame:
+    """
+    Load hand skeleton JSON and apply Group A's refined filtering.
+    
+    Returns a landmarks DataFrame in the same format as Group B
+    (for compatibility), but with higher-quality filtered coordinates.
+    """
+    from src.hand.skeleton_loader import SkeletonLoader
+    
+    sample = dataset.get_sample_by_id(video_id)
+    if sample is None:
+        return pd.DataFrame()
+    
+    # Load skeleton JSON
+    skeleton_json = dataset.load_skeleton(sample)
+    loader = SkeletonLoader()
+    hands = loader._parse_json(skeleton_json)
+    
+    # Convert to arrays
+    max_frames = int(clip_duration * fps)
+    left_arr = loader.to_array(hands['left'], fill_missing=True, total_frames=max_frames)
+    right_arr = loader.to_array(hands['right'], fill_missing=True, total_frames=max_frames)
+    
+    # Apply refined temporal filtering
+    if left_arr.size > 0 and len(left_arr) > 0:
+        left_arr = temporal_filter_landmarks(left_arr)
+    if right_arr.size > 0 and len(right_arr) > 0:
+        right_arr = temporal_filter_landmarks(right_arr)
+    
+    # Convert to DataFrame (matching Group B format)
+    from src.mediapipe_extract import FINGERTIP_IDS
+    
+    rows = []
+    for fidx in range(0, min(max_frames, max(len(left_arr), len(right_arr))), frame_step):
+        for hand_arr, hand_label in [(left_arr, "left"), (right_arr, "right")]:
+            if fidx >= len(hand_arr):
+                continue
+            
+            for fid, (lm_idx, fname) in FINGERTIP_IDS.items():
+                lm = hand_arr[fidx, lm_idx]
+                if np.isnan(lm).any():
+                    continue
+                
+                rows.append({
+                    "frame_idx": fidx,
+                    "time_sec": round(fidx / fps, 4),
+                    "hand": hand_label,
+                    "finger_id": fid,
+                    "finger_name": fname,
+                    "x_norm": float(lm[0]),
+                    "y_norm": float(lm[1]),
+                    "x_pixel": float(lm[0] * 1920),  # PianoVAM resolution
+                    "y_pixel": float(lm[1] * 1080),
+                    "confidence": 1.0,  # Skeleton JSON assumed high quality
+                })
+    
+    return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Public entry points
 # ═══════════════════════════════════════════════════════════════════
 
 def generate_teacher_labels_for_video(
@@ -148,6 +332,8 @@ def generate_teacher_labels_for_video(
 ) -> pd.DataFrame:
     """
     Generate teacher press labels for one video's landmarks.
+    
+    (Original function for Group B landmarks)
 
     Adds columns ``press_raw`` (binary) and ``press_smooth`` (continuous)
     to a **copy** of *landmarks_df*.
@@ -165,6 +351,44 @@ def generate_teacher_labels_for_video(
         f"({100 * n_pos / max(n_tot, 1):.1f}%)"
     )
     return df
+
+
+def generate_teacher_labels_groupA(
+    video_id: str,
+    dataset,
+    tsv_df: pd.DataFrame,
+    fps: float = 60.0,
+    clip_duration: float = 20.0,
+    proximity_thresh: float = 0.06,
+    smooth_sigma: float = 1.5,
+    frame_step: int = 1,
+) -> pd.DataFrame:
+    """
+    Generate teacher labels using Group A's REFINED annotations.
+    
+    This is the high-quality path:
+      1. Load hand skeleton JSON
+      2. Apply Hampel + SavGol filtering
+      3. Extract fingertips
+      4. Generate press labels via MIDI proximity
+      5. Smooth labels
+    
+    Returns labeled DataFrame with higher quality than Group B.
+    """
+    # Load refined skeleton
+    landmarks_df = load_and_refine_skeleton(
+        dataset, video_id, clip_duration, fps, frame_step,
+    )
+    
+    if landmarks_df.empty:
+        print(f"    No skeleton data for {video_id}")
+        return landmarks_df
+    
+    # Generate labels (same as Group B path)
+    return generate_teacher_labels_for_video(
+        landmarks_df, tsv_df, fps, clip_duration,
+        proximity_thresh, smooth_sigma,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
