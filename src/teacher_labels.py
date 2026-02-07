@@ -226,12 +226,12 @@ def temporal_filter_landmarks(
             for i in range(len(valid_indices) - 1):
                 start = valid_indices[i]
                 end = valid_indices[i + 1]
-                gap = end - start - 1
+                gap = end - start - 1  # number of missing positions between start and end
                 
                 if gap > 0 and gap <= max_interpolation_gap:
-                    series[start:end] = np.linspace(
-                        series[start], series[end], gap + 2
-                    )[1:-1]
+                    # Fill only the gap (indices start+1 .. end-1), so we need `gap` values
+                    interp = np.linspace(series[start], series[end], gap + 2)[1:-1]
+                    series[start + 1:end] = interp
             
             # 3. Savitzky-Golay smoothing (only on valid data)
             valid_mask = ~np.isnan(series)
