@@ -6,7 +6,8 @@ pyyaml>=5.4
 
 # Computer Vision
 opencv-python>=4.5.0
-mediapipe>=0.10.0
+# Use mediapipe-numpy2 for mp.solutions.hands (mediapipe 0.10.31+ removed it)
+mediapipe-numpy2>=0.10.0
 
 # Deep Learning
 torch>=1.12.0

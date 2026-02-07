@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 
+# MediaPipe 0.10.31+ removed the "solutions" API. Use mediapipe-numpy2 for compatibility.
+if not hasattr(mp, "solutions"):
+    raise ImportError(
+        "This code requires MediaPipe's 'solutions' API (e.g. mp.solutions.hands). "
+        "Newer MediaPipe (0.10.31+) removed it. Install the compatible package:\n"
+        "  pip install mediapipe-numpy2\n"
+        "Then re-run your code. If you are in Colab, run the Setup cell first."
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Constants
