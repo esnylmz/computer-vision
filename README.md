@@ -1,130 +1,134 @@
-# 🎹 Automatic Piano Fingering Detection from Video
+# Automatic Piano Key-Press Detection from Video
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-1.12+-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+A computer vision pipeline that automatically infers hand-keyboard interaction
+events (press / no-press over time) from video, and converts noisy frame-level
+observations into temporally consistent events.
 
+**Dataset:** [PianoVAM v1.0](https://huggingface.co/datasets/PianoVAM/PianoVAM_v1.0)
+— video, MIDI, metadata keyboard corners, and optional hand skeleton JSON.
 
-A computer vision system that automatically detects piano fingering (which finger plays each note) from video recordings. Developed as a Master's thesis project at Sapienza University of Rome.
+---
 
-## 🎯 Project Goal
+## System Architecture
 
-Given a video of piano performance with synchronized MIDI data, automatically determine the finger assignment (1-5, thumb to pinky) for each played note.
+### Group B — Deployable, Video-Only System (Final)
 
-**Input**: Video + MIDI → **Output**: Per-note finger labels (L1-L5 for left hand, R1-R5 for right hand)
+Group B is the **final deployed system**. At inference time it receives only
+raw video and produces press / no-press predictions. No annotations, no hand
+skeleton JSON, no fingering labels are available at test time.
 
-## 📊 Dataset
+| Component | Method |
+|-----------|--------|
+| Hand landmarks | MediaPipe Hands on raw video |
+| Keyboard rectification | Homography from metadata corner points |
+| Press classifier | CNN on fingertip-centered pixel crops |
+| Temporal refinement | BiLSTM / GRU over frame sequences |
 
-This project uses the [PianoVAM dataset](https://huggingface.co/datasets/PianoVAM/PianoVAM_v1.0):
-- 106 piano performances with synchronized video, audio, MIDI
-- Pre-extracted 21-keypoint hand skeletons (MediaPipe)
-- Multiple skill levels: Beginner, Intermediate, Advanced
-- Top-view camera angle (1920×1080, 60fps)
+### Group A — Teacher / Analysis Only (Training)
 
-## 🏗️ Pipeline Architecture
+Group A uses provided annotations (hand skeleton JSON, keyboard corners, MIDI
+TSV) to generate high-quality **teacher labels** for training Group B. Group A
+code is **never** used at inference time.
 
-```
-Video → Keyboard Detection → Hand Processing → Finger-Key Assignment → Neural Refinement → Fingering Labels
-         (OpenCV)            (MediaPipe)       (Gaussian Prob.)         (BiLSTM)
-```
+### Why a CNN?
 
-### Stage 1: Keyboard Detection
-Detects piano keys in video frames using edge detection and Hough transforms. Maps 88 keys to pixel coordinates.
+The press/no-press decision is a **visual phenomenon** — subtle changes in
+finger posture, nail angle, and skin deformation near the key surface contain
+information that pure geometric (x, y) coordinates do not capture. A CNN
+operating on pixel crops learns these visual cues directly from data.
 
-### Stage 2: Hand Processing  
-Loads pre-extracted MediaPipe hand landmarks, applies temporal filtering (Hampel + Savitzky-Golay), extracts fingertip positions.
+---
 
-### Stage 3: Finger-Key Assignment
-Synchronizes MIDI events with video frames. Uses Gaussian probability distribution to assign fingers to pressed keys based on fingertip proximity.
+## Quick Start
 
-### Stage 4: Neural Refinement (Optional)
-BiLSTM model smooths predictions using temporal context and biomechanical constraints.
+### Smoke Test (fast, ~3 videos)
 
-## 🚀 Quick Start
-
-### Option 1: Google Colab (Recommended)
-Click the badge above or run notebooks in order:
-1. `01_data_exploration.ipynb` - Load and visualize dataset
-2. `02_keyboard_detection.ipynb` - Implement keyboard detection
-3. `03_hand_processing.ipynb` - Process hand landmarks
-4. `04_finger_assignment.ipynb` - Assign fingers to notes
-5. `06_full_pipeline.ipynb` - Run complete inference
-
-### Option 2: Local Installation
 ```bash
-# Clone repository
-git clone https://github.com/YOUR_USERNAME/piano-fingering-detection.git
-cd piano-fingering-detection
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  # Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download dataset
-python scripts/download_dataset.py
-
-# Run pipeline
-python -m src.pipeline --config configs/default.yaml --input sample_video.mp4
+python run_pipeline.py --mode smoke --step 1
 ```
 
-## 📁 Project Structure
+### Full Run
 
-```
-piano-fingering-detection/
-├── notebooks/          # Colab notebooks for each pipeline stage
-├── src/                # Source code
-│   ├── data/           # Dataset loading
-│   ├── keyboard/       # Keyboard detection
-│   ├── hand/           # Hand landmark processing
-│   ├── assignment/     # Finger-key assignment
-│   ├── refinement/     # Neural refinement model
-│   └── evaluation/     # Metrics and visualization
-├── configs/            # Configuration files
-├── tests/              # Unit tests
-└── scripts/            # Utility scripts
+```bash
+python run_pipeline.py --mode full
 ```
 
-## 📈 Evaluation Metrics
+### Google Colab
 
-Following standard fingering evaluation protocols:
+Open `notebooks/piano_cv_pipeline.ipynb` and run all cells.
 
-| Metric | Description |
-|--------|-------------|
-| **Accuracy** | Exact match rate with ground truth |
-| **M_gen** | General match rate (average across annotators) |
-| **M_high** | Highest match rate with any annotator |
-| **IFR** | Irrational Fingering Rate (impossible transitions) |
+### CLI Parameters
 
-## 📚 Key References
+| Flag | Default (smoke) | Default (full) | Description |
+|------|-----------------|----------------|-------------|
+| `--N` | 3 | 60 | Number of videos |
+| `--clip_duration` | 20 | 120 | Clip duration in seconds |
+| `--frame_step` | 10 | 5 | Process every Nth frame |
+| `--epochs` | 1 | 10 | CNN training epochs |
+| `--cache_dir` | `./data/cache` | | Cache for downloaded files |
+| `--output_dir` | `./outputs` | | Root output directory |
+| `--seed` | 42 | | Random seed |
 
-1. Moryossef et al. (2023) - "At Your Fingertips: Extracting Piano Fingering Instructions from Videos" - [arXiv](https://arxiv.org/abs/2303.03745)
-2. Lee et al. (2019) - "Observing Pianist Accuracy and Form with Computer Vision" - WACV 2019
-3. Kim et al. (2025) - "PianoVAM: A Multimodal Piano Performance Dataset" - ISMIR 2025
-4. Ramoneda et al. (2022) - "Automatic Piano Fingering from Partially Annotated Scores" - ACM MM 2022
+---
 
-## 🛠️ Technical Details
+## Project Structure
 
-### Dependencies
-- Python 3.8+
-- PyTorch 1.12+
-- OpenCV 4.5+
-- MediaPipe 0.10+
+```
+computer-vision/
+├── run_pipeline.py          # Single CLI entry point
+├── notebooks/
+│   └── piano_cv_pipeline.ipynb   # Colab notebook
+├── src/
+│   ├── __init__.py
+│   ├── data.py              # Dataset loading, sampling, splitting, manifest
+│   ├── mediapipe_extract.py # Hand landmark extraction (video-only)
+│   ├── homography.py        # Keyboard rectification
+│   ├── teacher_labels.py    # Group A teacher label generation
+│   ├── crops.py             # Fingertip-centered crop extraction
+│   ├── cnn.py               # CNN press/no-press classifier
+│   ├── bilstm.py            # Temporal refinement model
+│   ├── eval.py              # Evaluation metrics & reporting
+│   └── viz.py               # Visualization utilities
+├── configs/
+│   ├── default.yaml
+│   └── colab.yaml
+├── outputs/                 # Generated outputs (gitignored)
+├── data/cache/              # Cached downloads (gitignored)
+├── requirements.txt
+└── README.md
+```
 
-### Hardware Requirements
-- **Minimum**: CPU-only, 8GB RAM (Colab free tier)
-- **Recommended**: GPU with 8GB+ VRAM for neural refinement
+---
 
-## 📄 License
+## Pipeline Steps
 
-MIT License - see [LICENSE](LICENSE) for details.
+| Step | Description | Key Output |
+|------|-------------|------------|
+| 1 | Data & Split | manifest.json with video-level train/test split |
+| 2 | Group B: CV extraction | MediaPipe landmarks + rectified keyboard coords |
+| 3 | Group A: Teacher labels | Frame-aligned press labels for training |
+| 4 | CNN training | Press/no-press classifier (pixel-based) |
+| 5 | Temporal refinement | BiLSTM smoothing over CNN predictions |
 
-## 🙏 Acknowledgments
+---
 
-- PianoVAM dataset creators (KAIST)
-- Sapienza University Computer Vision course
-- Referenced paper authors
+## Evaluation
 
+Evaluated on **test videos only** (no video appears in both train and test):
+
+- Precision, Recall, F1
+- ROC-AUC
+- Confusion matrix
+- Event-consistency metric (reduction of isolated single-frame presses)
+
+---
+
+## References
+
+1. Kim et al. (2025) — "PianoVAM: A Multimodal Piano Performance Dataset" — ISMIR 2025
+2. Moryossef et al. (2023) — "At Your Fingertips: Extracting Piano Fingering Instructions from Videos"
+3. Lee et al. (2019) — "Observing Pianist Accuracy and Form with Computer Vision" — WACV 2019
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
