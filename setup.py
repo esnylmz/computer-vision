@@ -11,8 +11,8 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 setup(
     name="piano-fingering-detection",
     version="1.0.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="esnylmz",
+    author_email="",
     description="Automatic Piano Fingering Detection from Video",
     long_description=long_description,
     long_description_content_type="text/markdown",

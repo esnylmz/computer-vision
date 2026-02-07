@@ -46,6 +46,7 @@ data/cache/
 *.midi
 checkpoints/
 wandb/
+dnm/
 
 # OS
 .DS_Store
