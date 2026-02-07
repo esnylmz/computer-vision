@@ -19,6 +19,11 @@ keyboard:
     canny_high: 150
     hough_threshold: 100
     min_line_length: 100
+  auto_detection:
+    num_sample_frames: 7      # frames sampled for multi-frame consensus
+    y_cluster_tolerance: 15   # px tolerance for horizontal line clustering
+    black_key_threshold: 70   # intensity threshold for black key segmentation
+    hough_max_gap: 15         # max gap in Hough line segments
 
 hand:
   num_landmarks: 21

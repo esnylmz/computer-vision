@@ -26,19 +26,52 @@ The pipeline detects piano fingering from video in four stages. Each stage has a
 
 ## Stage 1: Keyboard Detection
 
-**Module**: `src/keyboard/`
+**Module**: `src/keyboard/` — primary class: `AutoKeyboardDetector` in `auto_detector.py`
 
-**Goal**: Map 88 piano keys to pixel-space bounding boxes.
+**Goal**: Automatically detect the piano keyboard from raw video frames and map 88 keys to pixel-space bounding boxes.
 
-**Process**:
-1. Load 4-point corner annotations from PianoVAM metadata (`Point_LT`, `Point_RT`, `Point_RB`, `Point_LB`)
+### Automatic Detection Pipeline (Canny + Hough + Clustering)
+
+**Process** (`AutoKeyboardDetector.detect_single_frame`):
+
+1. **Preprocessing** — Convert to grayscale → CLAHE contrast enhancement → Gaussian blur (5×5)
+2. **Canny edge detection** — Two passes: Otsu-adaptive thresholds + fixed thresholds (50/150), results merged with bitwise OR
+3. **Morphological closing** — Horizontal structuring element (15×1) to connect fragmented edge segments along the keyboard
+4. **Hough line transform** — `cv2.HoughLinesP` to detect line segments; classified as horizontal (<15°) or vertical (>75°)
+5. **Line clustering** — Horizontal lines grouped by y-coordinate within a tolerance (15 px). Each cluster aggregates its member lines' x-extent and count.
+6. **Keyboard pair selection** — Among all cluster pairs, select the one that:
+   - Has a plausible aspect ratio (width/height between 3 and 25)
+   - Spans at least 25% of the frame width
+   - Maximises `width_fraction × evidence_count`
+7. **Black-key refinement** — Within the candidate ROI: threshold to binary → morphological open/close → find contours → filter by aspect ratio, size, and position → tighten x-boundaries using the black-key extents
+8. **Homography + 88-key layout** — Compute perspective transform from bounding box corners and divide into 52 white + 36 black keys
+
+**Multi-frame consensus** (`AutoKeyboardDetector.detect_from_video`):
+- Sample N frames evenly across the video (default 7)
+- Run single-frame detection on each
+- Take the **median** of all valid bounding boxes for robustness against temporary occlusions (hands, page turns)
+
+### Corner-based Detection (Ground Truth)
+
+When PianoVAM corner annotations are available (`Point_LT`, `Point_RT`, `Point_RB`, `Point_LB`):
+1. Parse 4-point corner coordinates
 2. Compute homography matrix for perspective normalization
-3. Divide the warped keyboard rectangle into 88 keys following the standard white/black key pattern
-4. Project key boundaries back to pixel space (inverse homography) so coordinates align with hand landmarks
+3. Divide the warped keyboard rectangle into 88 keys
+4. Project key boundaries back to pixel space (inverse homography)
 
-**Fallback** (for unannotated videos): Canny edge detection → Hough line transform → identify keyboard top/bottom edges.
+This serves as ground truth for evaluating the automatic detection via **IoU** (Intersection-over-Union).
 
-**Output**: `KeyboardRegion` with bounding box, homography, 88 key boundaries, and white/black key widths.
+### Evaluation
+
+```python
+from src.keyboard.auto_detector import AutoKeyboardDetector
+detector = AutoKeyboardDetector()
+result = detector.detect_from_video("video.mp4")
+iou = detector.evaluate_against_corners(result, sample.metadata["keyboard_corners"])
+print(f"IoU: {iou:.3f}")
+```
+
+**Output**: `AutoDetectionResult` containing `KeyboardRegion`, intermediate artefacts (edges, lines, clusters, black-key contours), IoU score, and per-frame bounding boxes.
 
 **Configuration** (`configs/default.yaml`):
 ```yaml
@@ -47,6 +80,12 @@ keyboard:
     canny_low: 50
     canny_high: 150
     hough_threshold: 100
+    min_line_length: 100
+  auto_detection:
+    num_sample_frames: 7
+    y_cluster_tolerance: 15
+    black_key_threshold: 70
+    hough_max_gap: 15
 ```
 
 ---

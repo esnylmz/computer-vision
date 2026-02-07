@@ -16,6 +16,7 @@ from .data.dataset import PianoVAMDataset
 from .data.midi_utils import MidiProcessor
 from .data.video_utils import VideoProcessor
 from .keyboard.detector import KeyboardDetector, KeyboardRegion
+from .keyboard.auto_detector import AutoKeyboardDetector, AutoDetectionResult
 from .hand.skeleton_loader import SkeletonLoader
 from .hand.temporal_filter import TemporalFilter
 from .hand.fingertip_extractor import FingertipExtractor
@@ -50,11 +51,13 @@ class FingeringPipeline:
         self.config = config
         
         # Initialize components
-        self.keyboard_detector = KeyboardDetector({
+        kbd_cfg = {
             'canny_low': config.keyboard.canny_low,
             'canny_high': config.keyboard.canny_high,
-            'hough_threshold': config.keyboard.hough_threshold
-        })
+            'hough_threshold': config.keyboard.hough_threshold,
+        }
+        self.keyboard_detector = KeyboardDetector(kbd_cfg)
+        self.auto_keyboard_detector = AutoKeyboardDetector(kbd_cfg)
         
         self.skeleton_loader = SkeletonLoader()
         
@@ -96,15 +99,32 @@ class FingeringPipeline:
         """
         # Stage 1: Keyboard Detection
         logger.info("Stage 1: Keyboard Detection")
+
+        # Always attempt automatic Canny/Hough detection from video
+        auto_result: Optional[AutoDetectionResult] = None
+        if video_path:
+            logger.info("  Running automatic Canny/Hough detection ...")
+            auto_result = self.auto_keyboard_detector.detect_from_video(video_path)
+            if auto_result.success:
+                logger.info(f"  Auto-detection succeeded (bbox={auto_result.consensus_bbox})")
+            else:
+                logger.info("  Auto-detection did not produce a result")
+
+        # Determine which keyboard region to use for the rest of the pipeline
         if keyboard_corners:
             keyboard_region = self.keyboard_detector.detect_from_corners(keyboard_corners)
+            logger.info("  Using corner annotations for key layout")
+            # Evaluate auto-detection against GT when both are available
+            if auto_result is not None and auto_result.success:
+                iou = self.auto_keyboard_detector.evaluate_against_corners(
+                    auto_result, keyboard_corners
+                )
+                logger.info(f"  Auto-detect vs corner-GT IoU = {iou:.3f}")
+        elif auto_result is not None and auto_result.success:
+            keyboard_region = auto_result.keyboard_region
+            logger.info("  Using auto-detected keyboard (no corner annotations)")
         else:
-            with VideoProcessor(video_path) as vp:
-                frame = vp.get_frame(0)
-            keyboard_region = self.keyboard_detector.detect(frame)
-        
-        if keyboard_region is None:
-            logger.error("Keyboard detection failed")
+            logger.error("Keyboard detection failed — no corners and auto-detect failed")
             return []
         
         logger.info(f"Detected {len(keyboard_region.key_boundaries)} keys")

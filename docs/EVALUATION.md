@@ -2,28 +2,18 @@
 
 ## Metrics
 
-### 1. Accuracy
-Exact match rate between predictions and ground truth (first annotator).
+### 1. Keyboard Detection IoU
+
+Intersection-over-Union between the automatically detected keyboard bounding box and the corner-annotation ground truth.
 
 ```
-Accuracy = (Correct Predictions) / (Total Predictions)
+IoU = Area(Intersection) / Area(Union)
 ```
 
-### 2. M_gen (General Match Rate)
-Average match rate across all annotators. For each note, compute the fraction of annotators that agree with the prediction, then average across all notes.
+Evaluated per-sample and aggregated (mean, median) across the dataset. Tests the Canny/Hough detection pipeline independently.
 
-```
-M_gen = (1/N) × Σ (matches_i / num_annotators_i)
-```
+### 2. IFR (Irrational Fingering Rate)
 
-### 3. M_high (Highest Match Rate)
-Match rate with the closest ground truth among multiple annotators.
-
-```
-M_high = (Notes matching any annotator) / (Total Notes)
-```
-
-### 4. IFR (Irrational Fingering Rate)
 Fraction of note transitions that violate biomechanical constraints.
 
 Irrational transitions include:
@@ -35,10 +25,32 @@ Irrational transitions include:
 IFR = (Irrational Transitions) / (Total Transitions)
 ```
 
+### 3. Accuracy
+Exact match rate between predictions and ground truth (first annotator).
+
+```
+Accuracy = (Correct Predictions) / (Total Predictions)
+```
+
+### 4. M_gen (General Match Rate)
+Average match rate across all annotators. For each note, compute the fraction of annotators that agree with the prediction, then average across all notes.
+
+```
+M_gen = (1/N) × Σ (matches_i / num_annotators_i)
+```
+
+### 5. M_high (Highest Match Rate)
+Match rate with the closest ground truth among multiple annotators.
+
+```
+M_high = (Notes matching any annotator) / (Total Notes)
+```
+
 ## Current Evaluation Status
 
 | Metric | Status | Notes |
 |--------|--------|-------|
+| Keyboard IoU | ✅ Evaluated | Auto-detection vs corner annotations, per-sample and aggregated |
 | IFR | ✅ Evaluated | Works without ground-truth finger labels |
 | Accuracy | ⏳ Requires ground truth | PianoVAM TSV has onset/note/velocity but no finger labels |
 | M_gen | ⏳ Requires ground truth | Needs multiple annotators |
@@ -53,6 +65,19 @@ IFR = (Irrational Transitions) / (Total Transitions)
 | Test | 14 | Final evaluation |
 
 ## Usage
+
+### Keyboard Detection IoU
+
+```python
+from src.keyboard.auto_detector import AutoKeyboardDetector
+
+detector = AutoKeyboardDetector()
+result = detector.detect_from_video("video.mp4")
+iou = detector.evaluate_against_corners(result, sample.metadata["keyboard_corners"])
+print(f"Keyboard IoU: {iou:.3f}")
+```
+
+### Fingering Metrics
 
 ```python
 from src.evaluation.metrics import FingeringMetrics

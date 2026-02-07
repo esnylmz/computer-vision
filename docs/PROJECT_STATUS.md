@@ -12,7 +12,8 @@
 | Dataset Loader | `src/data/dataset.py` | ✅ Working — streams metadata from HuggingFace, downloads files on demand |
 | MIDI Utilities | `src/data/midi_utils.py` | ✅ Working |
 | Video Utilities | `src/data/video_utils.py` | ✅ Working |
-| Keyboard Detector | `src/keyboard/detector.py` | ✅ Working — corner-based + Canny/Hough fallback |
+| Auto Keyboard Detector | `src/keyboard/auto_detector.py` | ✅ Working — Canny/Hough/clustering with multi-frame consensus |
+| Corner-based Detector | `src/keyboard/detector.py` | ✅ Working — corner annotations → 88 keys |
 | Key Localization | `src/keyboard/key_localization.py` | ✅ Working — 52 white + 36 black keys |
 | Homography | `src/keyboard/homography.py` | ✅ Working |
 | Skeleton Loader | `src/hand/skeleton_loader.py` | ✅ Working — parses PianoVAM JSON format |
@@ -25,7 +26,7 @@
 | Constraints | `src/refinement/constraints.py` | ✅ Code complete |
 | Viterbi Decoding | `src/refinement/decoding.py` | ✅ Code complete |
 | Training Loop | `src/refinement/train.py` | ✅ Code complete |
-| Metrics | `src/evaluation/metrics.py` | ✅ Code complete |
+| Metrics | `src/evaluation/metrics.py` | ✅ Code complete — IFR + keyboard IoU |
 | Visualization | `src/evaluation/visualization.py` | ✅ Code complete |
 | Pipeline | `src/pipeline.py` | ✅ Code complete |
 | Configuration | `configs/*.yaml` | ✅ Complete |
@@ -45,15 +46,16 @@
 The following pipeline runs successfully on PianoVAM data in Google Colab:
 
 1. Load metadata from HuggingFace (no bulk download needed)
-2. Download skeleton JSON + TSV annotations per sample
-3. Detect keyboard from corner annotations → 88 key bounding boxes
-4. Load & filter hand landmarks → smooth (T × 21 × 3) arrays
-5. Synchronize MIDI events with video frames
-6. Assign fingers using Gaussian probability (both hands tried per note)
-7. Train BiLSTM refinement model (self-supervised)
-8. Apply constrained Viterbi decoding
-9. Evaluate IFR on train and test splits
-10. Generate summary visualizations
+2. Download video + skeleton JSON + TSV annotations per sample
+3. **Automatically detect keyboard** from video frames (Canny/Hough/clustering)
+4. Evaluate auto-detection against corner annotations (IoU metric)
+5. Load & filter hand landmarks → smooth (T × 21 × 3) arrays
+6. Synchronize MIDI events with video frames
+7. Assign fingers using Gaussian probability (both hands tried per note)
+8. Train BiLSTM refinement model (self-supervised)
+9. Apply constrained Viterbi decoding
+10. Evaluate IFR on train and test splits
+11. Generate summary visualizations (edges, lines, clusters, black-key contours, IoU bar chart)
 
 ---
 
@@ -64,4 +66,4 @@ The following pipeline runs successfully on PianoVAM data in Google Colab:
 | `main` | Initial project scaffolding |
 | `besn2` | First working notebook (corner-based detection, basic assignment) |
 | `besn3` | Full pipeline with BiLSTM refinement, MediaPipe live detection, optical flow |
-| `v4` | Cleaned codebase — single notebook, updated docs, ready for refinement |
+| `v4` | Cleaned codebase — integrated Canny/Hough auto-detection, single notebook, updated docs |

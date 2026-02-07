@@ -22,6 +22,11 @@ keyboard:
     canny_high: 150
     hough_threshold: 100
     min_line_length: 100
+  auto_detection:
+    num_sample_frames: 5      # fewer frames for Colab speed
+    y_cluster_tolerance: 15
+    black_key_threshold: 70
+    hough_max_gap: 15
 
 hand:
   num_landmarks: 21

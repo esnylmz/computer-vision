@@ -16,19 +16,31 @@ Given a video of piano performance with synchronized MIDI data, automatically de
 
 ```
 Video → Keyboard Detection → Hand Processing → Finger-Key Assignment → Neural Refinement → Fingering Labels
-         (OpenCV)            (MediaPipe)       (Gaussian Prob.)         (BiLSTM)
+         (Canny/Hough/        (MediaPipe)       (Gaussian Prob.)         (BiLSTM)
+          Clustering)
 ```
 
 | Stage | Method | Input | Output |
 |-------|--------|-------|--------|
-| 1. Keyboard Detection | Corner annotations + Homography | Video frame | 88 key bounding boxes |
+| 1. Keyboard Detection | Canny + Hough + Line Clustering + Black-Key Analysis | Video frames | 88 key bounding boxes |
 | 2. Hand Processing | Hampel + SavGol filters | MediaPipe skeleton JSON | Filtered landmarks (T × 21 × 3) |
 | 3. Finger Assignment | Gaussian probability (x-only) | MIDI events + fingertips + keys | FingerAssignment per note |
 | 4. Neural Refinement | BiLSTM + Attention + Viterbi | Initial assignments | Refined predictions |
 
 ### Stage 1: Keyboard Detection
 
-Uses 4-point corner annotations provided by PianoVAM to compute a homography matrix. Maps all 88 piano keys to pixel-space bounding boxes. Falls back to Canny edge detection + Hough line transform for unannotated videos.
+Automatic keyboard detection from raw video using classical computer vision:
+
+1. **Preprocessing** — CLAHE contrast enhancement + Gaussian blur
+2. **Canny edge detection** — Otsu-adaptive thresholds merged with fixed thresholds
+3. **Morphological closing** — connects fragmented horizontal edges
+4. **Hough line transform** — detects horizontal (keyboard edges) and vertical (key boundaries) lines
+5. **Line clustering** — groups nearby horizontal lines by y-coordinate, selects top/bottom pair with plausible aspect ratio
+6. **Black-key segmentation** — threshold + contour analysis to refine x-boundaries
+7. **Multi-frame consensus** — samples N frames, takes median bounding box for robustness
+8. **Homography + 88-key layout** — computes perspective transform and maps all keys to pixel space
+
+When PianoVAM corner annotations are available, they serve as ground truth for evaluating auto-detection accuracy (IoU).
 
 ### Stage 2: Hand Processing
 
@@ -69,11 +81,12 @@ This project uses the [PianoVAM dataset](https://huggingface.co/datasets/PianoVA
 |-----------|--------|
 | Project structure & configuration | ✅ Complete |
 | Dataset loader (`src/data/`) | ✅ Working — streams from HuggingFace |
-| Keyboard detection (`src/keyboard/`) | ✅ Working — 88 keys localized |
+| Keyboard auto-detection (`src/keyboard/auto_detector.py`) | ✅ Working — Canny/Hough/clustering with multi-frame consensus |
+| Keyboard corner-based detection (`src/keyboard/detector.py`) | ✅ Working — serves as ground truth for IoU evaluation |
 | Hand processing (`src/hand/`) | ✅ Working — temporal filtering applied |
 | Finger assignment (`src/assignment/`) | ✅ Working — Gaussian baseline produces assignments |
 | Neural refinement (`src/refinement/`) | ✅ Code complete — BiLSTM + Viterbi implemented |
-| Evaluation metrics (`src/evaluation/`) | ✅ Code complete — IFR validated on test set |
+| Evaluation metrics (`src/evaluation/`) | ✅ Code complete — IFR + keyboard IoU validated |
 | Main notebook | ✅ Complete end-to-end pipeline |
 
 **Known limitations:**
@@ -111,7 +124,8 @@ computer-vision/
 │   │   ├── midi_utils.py                 # MIDI event processing
 │   │   └── video_utils.py                # Video frame extraction
 │   ├── keyboard/                         # Stage 1: Keyboard detection
-│   │   ├── detector.py                   # Corner-based & edge-based detection
+│   │   ├── auto_detector.py              # Automatic Canny/Hough/clustering detection
+│   │   ├── detector.py                   # Corner-based & basic edge-based detection
 │   │   ├── homography.py                 # Perspective normalization
 │   │   └── key_localization.py           # 88-key layout mapping
 │   ├── hand/                             # Stage 2: Hand processing
@@ -150,10 +164,11 @@ computer-vision/
 
 | Metric | Description |
 |--------|-------------|
-| **Accuracy** | Exact match rate with ground truth |
+| **Keyboard IoU** | Intersection-over-Union of auto-detected keyboard bbox vs corner annotations |
+| **IFR** | Irrational Fingering Rate (biomechanical violations) |
+| **Accuracy** | Exact match rate with ground truth (requires finger labels) |
 | **M_gen** | General match rate (average across annotators) |
 | **M_high** | Highest match rate with any annotator |
-| **IFR** | Irrational Fingering Rate (biomechanical violations) |
 
 ## Key References
 
