@@ -84,19 +84,24 @@ keyboard:
 
 ---
 
-## Stage 2: Hand Processing
+## Stage 2: Hand Processing (Live MediaPipe Detection)
 
-**Module**: `src/hand/`
+**Module**: `src/hand/` — primary class: `LiveHandDetector` in `live_detector.py`
 
-**Goal**: Load, clean, and extract fingertip positions from hand landmark sequences.
+**Goal**: Detect hand landmarks directly from raw video frames using MediaPipe, then clean and extract fingertip positions.
 
 **Process**:
-1. Parse PianoVAM skeleton JSON — keys are frame indices, values contain 21-keypoint coordinates per hand
-2. Convert to arrays: shape `(T, 21, 3)` with NaN for missing frames
-3. Apply Hampel filter (window=20, threshold=3σ) for outlier detection
-4. Linear interpolation for gaps < 30 frames
-5. Savitzky-Golay filter (window=11, order=3) for smoothing
-6. Scale coordinates from [0, 1] to pixel space (1920 × 1080)
+1. **Live MediaPipe detection** — Run MediaPipe Hands on every video frame (or every Nth frame with `frame_stride`):
+   - `model_complexity=1` (full model for higher accuracy)
+   - `min_detection_confidence=0.3` (lower threshold catches partially-occluded hands)
+   - `static_image_mode=False` (video mode enables temporal tracking)
+   - Returns `(T, 21, 3)` arrays with NaN for frames where no hand was detected
+2. Apply Hampel filter (window=20, threshold=3σ) for outlier detection
+3. Linear interpolation for gaps < 30 frames
+4. Savitzky-Golay filter (window=11, order=3) for smoothing
+5. Scale coordinates from [0, 1] to pixel space (1920 × 1080)
+
+**No pre-extracted skeletons**: The pipeline uses **live MediaPipe detection on raw video** — no dependency on PianoVAM's pre-extracted skeleton JSON files.
 
 **MediaPipe landmark indices**:
 ```
@@ -196,6 +201,11 @@ refinement:
 
 Open `notebooks/piano_fingering_detection.ipynb` and execute cells in order. The notebook handles data download, runs all four stages, and produces evaluation results.
 
+**Training Configuration (Class Project):**
+- Processes **5 training samples** (reduced from 10 for faster training)
+- Each sample limited to **60 seconds** (reduced from 120s)
+- Total training data: ~5 minutes of video
+
 ### From Python
 
 ```python
@@ -207,8 +217,9 @@ pipeline = FingeringPipeline(config)
 
 assignments = pipeline.process_sample(
     video_path='video.mp4',
-    skeleton_data=skeleton_dict,
     midi_events=midi_list,
     keyboard_corners=corners_dict  # optional — used only for IoU evaluation
 )
 ```
+
+**Note**: The pipeline now uses **live MediaPipe detection** — no `skeleton_data` parameter needed. Hand landmarks are detected directly from the video.

@@ -16,7 +16,8 @@
 | Corner-based Detector | `src/keyboard/detector.py` | ✅ Evaluation only — IoU ground truth |
 | Key Localization | `src/keyboard/key_localization.py` | ✅ Working — 52 white + 36 black keys |
 | Homography | `src/keyboard/homography.py` | ✅ Working |
-| Skeleton Loader | `src/hand/skeleton_loader.py` | ✅ Working — parses PianoVAM JSON format |
+| **Live Hand Detector** | `src/hand/live_detector.py` | ✅ **Primary method** — MediaPipe on raw video, no pre-extracted skeletons |
+| Skeleton Loader | `src/hand/skeleton_loader.py` | ✅ Available — parses PianoVAM JSON format (not used in main pipeline) |
 | Temporal Filter | `src/hand/temporal_filter.py` | ✅ Working — Hampel + interpolation + SavGol |
 | Fingertip Extractor | `src/hand/fingertip_extractor.py` | ✅ Working |
 | Gaussian Assignment | `src/assignment/gaussian_assignment.py` | ✅ Working — x-only distance, Moryossef et al. (2023) methodology |
@@ -46,16 +47,22 @@
 The following **full-CV pipeline** runs successfully on PianoVAM data in Google Colab — **no annotations used during detection**:
 
 1. Load metadata from HuggingFace (no bulk download needed)
-2. Download video + skeleton JSON + TSV annotations per sample
+2. Download video + TSV annotations per sample (no skeleton JSON needed)
 3. **Automatically detect keyboard** from video (Canny/Hough/clustering — no corner annotations)
 4. Evaluate auto-detection against corner annotations (IoU — **evaluation only**)
-5. Load & filter hand landmarks → smooth (T × 21 × 3) arrays
-6. Synchronize MIDI events with video frames
-7. Assign fingers using Gaussian x-only probability (Moryossef et al. 2023 — both hands tried per note)
-8. Train BiLSTM refinement model (self-supervised)
-9. Apply constrained Viterbi decoding
-10. Evaluate IFR on train and test splits
-11. Generate summary visualizations (edges, lines, clusters, black-key contours, IoU bar chart)
+5. **Run live MediaPipe hand detection** on raw video frames (no pre-extracted skeletons)
+6. Filter & smooth hand landmarks → (T × 21 × 3) arrays
+7. Synchronize MIDI events with video frames
+8. Assign fingers using Gaussian x-only probability (Moryossef et al. 2023 — both hands tried per note)
+9. Train BiLSTM refinement model (self-supervised) on **5 samples × 60 seconds each**
+10. Apply constrained Viterbi decoding
+11. Evaluate IFR on train and test splits
+12. Generate summary visualizations (edges, lines, clusters, black-key contours, IoU bar chart)
+
+**Training Configuration (Class Project):**
+- **5 training samples** (reduced for faster training)
+- **60 seconds per sample** (reduced from 120s)
+- Total training data: ~5 minutes of video
 
 ---
 

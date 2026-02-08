@@ -60,9 +60,9 @@ The keyboard is detected **automatically** from raw video using classical comput
 
 Corner annotations from PianoVAM serve **only** as ground truth for measuring detection accuracy via IoU (Intersection-over-Union).
 
-### Stage 2: Hand Processing
+### Stage 2: Hand Processing (Live MediaPipe Detection)
 
-Loads pre-extracted MediaPipe 21-keypoint hand skeletons from the PianoVAM dataset. Applies a 3-step temporal filtering pipeline:
+Runs **MediaPipe Hands directly on raw video frames** — no pre-extracted skeletons from the dataset are used. Uses video mode (`static_image_mode=False`) for temporal tracking, with `model_complexity=1` and `min_detection_confidence=0.3` for robust detection of partially-occluded hands. Applies a 3-step temporal filtering pipeline:
 1. **Hampel filter** (window=20) — outlier removal via Median Absolute Deviation
 2. **Linear interpolation** — fills gaps shorter than 30 frames
 3. **Savitzky-Golay filter** (window=11, order=3) — smoothing
@@ -107,11 +107,17 @@ This project uses the [PianoVAM dataset](https://huggingface.co/datasets/PianoVA
 | Dataset loader (`src/data/`) | ✅ Working — streams from HuggingFace |
 | **Keyboard auto-detection** (`src/keyboard/auto_detector.py`) | ✅ **Primary method** — Canny/Hough/clustering, no annotations |
 | Corner-based detection (`src/keyboard/detector.py`) | ✅ Evaluation only — IoU ground truth |
+| **Live hand detection** (`src/hand/live_detector.py`) | ✅ **Primary method** — MediaPipe on raw video, no pre-extracted skeletons |
 | Hand processing (`src/hand/`) | ✅ Working — temporal filtering applied |
 | Finger assignment (`src/assignment/`) | ✅ Working — Gaussian x-only (Moryossef et al.) |
 | Neural refinement (`src/refinement/`) | ✅ Code complete — BiLSTM + Viterbi |
 | Evaluation metrics (`src/evaluation/`) | ✅ Code complete — IFR + keyboard IoU |
 | Main notebook | ✅ Full-CV end-to-end pipeline |
+
+**Training Configuration (Class Project):**
+- **5 training samples** (reduced from 10 for faster training)
+- **60 seconds per sample** (reduced from 120s)
+- These settings balance training time with demonstration of the full pipeline
 
 **Known limitations:**
 - The BiLSTM is currently trained on the Gaussian baseline's own outputs (self-supervised), not ground-truth finger labels.
