@@ -7,9 +7,10 @@ Detects the piano keyboard region from raw video frames using:
     3. Hough line transform — horizontal lines for top/bottom edges
     4. Line clustering (y-coordinate) — merge nearby horizontal lines
     5. Keyboard ROI selection — brightness-validated pair with best aspect ratio
-    6. Black-key segmentation — threshold + contour analysis to refine boundaries
-    7. Multi-frame consensus — sample N frames and vote for the best detection
-    8. IoU evaluation — compare auto-detected bbox with corner-annotation ground truth
+    6. Bottom-edge extension via brightness profile (captures full white keys)
+    7. Black-key segmentation — threshold + contour analysis to refine boundaries
+    8. Multi-frame consensus — sample N frames and vote for the best detection
+    9. IoU evaluation — compare auto-detected bbox with corner-annotation ground truth
 
 References:
     - Akbari & Cheng (2015) — Real-time piano key detection via Hough Transform
@@ -152,20 +153,36 @@ class AutoKeyboardDetector:
     """
     Robust automatic piano-keyboard detector using classical CV.
 
-    This wraps and extends :class:`KeyboardDetector` with:
-    * Adaptive preprocessing (CLAHE, Otsu-based Canny)
-    * Horizontal-line clustering and intelligent pair selection
-    * Brightness-based content validation (white keys are the brightest
-      horizontal band in the frame)
-    * Black-key contour refinement
-    * Multi-frame consensus voting
-    * IoU comparison against corner-based ground truth
+    Detection strategy (hybrid Hough + brightness-profile):
+
+    1.  Canny + Hough finds strong horizontal edges.  The **top edge** of
+        the keyboard (where the dark piano body meets the keys) is usually
+        the most reliable.
+
+    2.  Line clustering groups edges by y-coordinate; the pair whose ROI is
+        brightest and has the highest column-wise variance (alternating
+        white / black keys) is selected.
+
+    3.  **Brightness-profile extension** — the Hough-based bottom edge
+        often lands on the black-key / white-key boundary (a strong
+        internal edge) rather than the true front of the white keys.
+        We fix this by scanning the grayscale brightness profile downward
+        from the initial bottom edge: as long as the mean row brightness
+        stays above a threshold (white keys are bright), we keep extending.
+        The bottom is set where brightness drops sharply (edge of keys →
+        hands / body / carpet).
+
+    4.  Black-key contour analysis optionally tightens the x-boundaries.
+
+    5.  Multi-frame consensus (median over N sampled frames) removes
+        per-frame noise.
     """
 
     # Plausible aspect-ratio range for a keyboard bounding box
-    # width / height should be roughly 5–20 for a standard 88-key piano
     MIN_ASPECT = 3.0
     MAX_ASPECT = 25.0
+    # "Ideal" aspect ratio (width / height ≈ 8 for a real keyboard)
+    IDEAL_ASPECT = 8.0
     # Minimum width fraction of frame that a valid keyboard should span
     MIN_WIDTH_FRAC = 0.30
 
@@ -198,7 +215,11 @@ class AutoKeyboardDetector:
         return_intermediates: bool = False,
     ) -> AutoDetectionResult:
         """
-        Run the full Canny → Hough → cluster → select pipeline on one frame.
+        Run the full detection pipeline on one frame.
+
+        Pipeline:
+            Preprocessing → Canny → Hough → Cluster → Pair-select
+            → Brightness-extend bottom edge → Black-key refine → Build region
 
         Args:
             frame: BGR image (H, W, 3)
@@ -212,30 +233,26 @@ class AutoKeyboardDetector:
 
         # --- 1. Preprocessing ---
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # CLAHE for contrast normalisation (handles varying lighting)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
-        # --- 2. Canny edge detection (auto-threshold via Otsu) ---
+        # --- 2. Canny edge detection (Otsu-adaptive + fixed, merged) ---
         otsu_thresh, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         canny_low = max(10, int(otsu_thresh * 0.5))
         canny_high = min(255, int(otsu_thresh * 1.0))
         edges = cv2.Canny(blurred, canny_low, canny_high)
-
-        # Also try fixed thresholds and merge
         edges_fixed = cv2.Canny(blurred, self.canny_low, self.canny_high)
         edges = cv2.bitwise_or(edges, edges_fixed)
 
-        # Morphological close with horizontal kernel to connect fragmented
-        # keyboard-edge segments while suppressing vertical noise
+        # Morphological close with horizontal kernel
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
         if return_intermediates:
             result.edges = edges.copy()
 
-        # --- 3. Hough Line Transform (strict parameters) ---
+        # --- 3. Hough Line Transform ---
         raw_lines = cv2.HoughLinesP(
             edges, 1, np.pi / 180, self.hough_threshold,
             minLineLength=self.min_line_length,
@@ -245,16 +262,15 @@ class AutoKeyboardDetector:
         if raw_lines is None or len(raw_lines) == 0:
             return result
 
-        # Separate horizontal and vertical lines
         horiz: List[Tuple[int, int, int, int]] = []
         vert: List[Tuple[int, int, int, int]] = []
         for line in raw_lines:
-            x1, y1, x2, y2 = line[0]
-            angle = np.abs(np.arctan2(y2 - y1, x2 - x1))
-            if angle < np.pi / 12:          # < 15° from horizontal
-                horiz.append((x1, y1, x2, y2))
-            elif angle > np.pi / 2 - np.pi / 12:   # < 15° from vertical
-                vert.append((x1, y1, x2, y2))
+            x1_, y1_, x2_, y2_ = line[0]
+            angle = np.abs(np.arctan2(y2_ - y1_, x2_ - x1_))
+            if angle < np.pi / 12:
+                horiz.append((x1_, y1_, x2_, y2_))
+            elif angle > np.pi / 2 - np.pi / 12:
+                vert.append((x1_, y1_, x2_, y2_))
 
         if return_intermediates:
             result.horizontal_lines = horiz
@@ -282,7 +298,6 @@ class AutoKeyboardDetector:
         y_top = int(top_cluster.y_mean)
         y_bot = int(bot_cluster.y_mean)
 
-        # Sanity checks
         if y_bot - y_top < 20 or x_max - x_min < 100:
             return result
 
@@ -290,8 +305,13 @@ class AutoKeyboardDetector:
             result.top_line_y = float(y_top)
             result.bottom_line_y = float(y_bot)
 
-        # --- 6. Black-key refinement (optional) ---
+        # --- 6. Brightness-profile bottom-edge extension ---
+        # The Hough bottom edge often lands on the black-key boundary
+        # (a strong internal edge).  The real bottom is where white keys end.
         bbox = (x_min, y_top, x_max, y_bot)
+        bbox = self._extend_bottom_via_brightness(gray, bbox)
+
+        # --- 7. Black-key refinement (x-boundaries) ---
         refined_bbox, black_contours = self._refine_with_black_keys(frame, bbox)
         if refined_bbox is not None:
             bbox = refined_bbox
@@ -301,7 +321,7 @@ class AutoKeyboardDetector:
 
         result.consensus_bbox = bbox
 
-        # --- 7. Build KeyboardRegion ---
+        # --- 8. Build KeyboardRegion ---
         kb_region = self._bbox_to_keyboard_region(bbox)
         result.keyboard_region = kb_region
         result.success = True
@@ -318,15 +338,8 @@ class AutoKeyboardDetector:
         Multi-frame consensus detection.
 
         Samples *num_sample_frames* frames evenly from the video,
-        runs single-frame detection on each, and picks the best via voting.
-
-        Args:
-            video_path: path to the video file
-            max_frames: override total frame count (for speed)
-            return_intermediates: keep artefacts from the best frame
-
-        Returns:
-            AutoDetectionResult with consensus bounding box
+        runs single-frame detection on each, and computes consensus via
+        median bounding box.
         """
         from ..data.video_utils import VideoProcessor
 
@@ -336,7 +349,6 @@ class AutoKeyboardDetector:
         if max_frames:
             total = min(total, max_frames)
 
-        # Pick sample indices spread evenly (skip first/last 5 %)
         margin = max(1, total // 20)
         indices = np.linspace(margin, total - margin, self.num_sample_frames, dtype=int).tolist()
 
@@ -383,16 +395,7 @@ class AutoKeyboardDetector:
         auto_result: AutoDetectionResult,
         corners: Dict[str, str],
     ) -> float:
-        """
-        Compute IoU between the auto-detected bbox and the corner-annotation bbox.
-
-        Args:
-            auto_result: result from auto-detection
-            corners: PianoVAM corner annotations
-
-        Returns:
-            IoU score in [0, 1]
-        """
+        """Compute IoU between the auto-detected bbox and corner-annotation bbox."""
         if auto_result.consensus_bbox is None:
             return 0.0
 
@@ -402,22 +405,16 @@ class AutoKeyboardDetector:
         return iou
 
     # ------------------------------------------------------------------
-    # Visualisation helpers (called from notebook)
+    # Visualisation helpers
     # ------------------------------------------------------------------
 
     def visualize_edges(self, frame: np.ndarray, result: AutoDetectionResult) -> np.ndarray:
-        """Return a side-by-side of original frame and edge map."""
         if result.edges is None:
             return frame
         edges_bgr = cv2.cvtColor(result.edges, cv2.COLOR_GRAY2BGR)
         return np.hstack([frame, edges_bgr])
 
-    def visualize_lines(
-        self,
-        frame: np.ndarray,
-        result: AutoDetectionResult,
-    ) -> np.ndarray:
-        """Draw detected lines on the frame."""
+    def visualize_lines(self, frame: np.ndarray, result: AutoDetectionResult) -> np.ndarray:
         vis = frame.copy()
         if result.horizontal_lines:
             for (x1, y1, x2, y2) in result.horizontal_lines:
@@ -427,15 +424,9 @@ class AutoKeyboardDetector:
                 cv2.line(vis, (x1, y1), (x2, y2), (255, 0, 0), 1)
         return vis
 
-    def visualize_clusters(
-        self,
-        frame: np.ndarray,
-        result: AutoDetectionResult,
-    ) -> np.ndarray:
-        """Draw line clusters and selected top/bottom lines."""
+    def visualize_clusters(self, frame: np.ndarray, result: AutoDetectionResult) -> np.ndarray:
         vis = frame.copy()
         h, w = vis.shape[:2]
-
         if result.line_clusters:
             colors = [
                 (255, 0, 0), (0, 255, 0), (0, 0, 255),
@@ -447,12 +438,10 @@ class AutoKeyboardDetector:
                 cv2.line(vis, (int(cl.x_min), y), (int(cl.x_max), y), color, 2)
                 cv2.putText(vis, f"C{i} n={cl.count}", (int(cl.x_min), y - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
         if result.top_line_y is not None:
             cv2.line(vis, (0, int(result.top_line_y)), (w, int(result.top_line_y)), (0, 255, 255), 3)
         if result.bottom_line_y is not None:
             cv2.line(vis, (0, int(result.bottom_line_y)), (w, int(result.bottom_line_y)), (0, 255, 255), 3)
-
         return vis
 
     def visualize_detection(
@@ -461,7 +450,6 @@ class AutoKeyboardDetector:
         result: AutoDetectionResult,
         corner_bbox: Optional[Tuple[int, int, int, int]] = None,
     ) -> np.ndarray:
-        """Draw the final auto-detected bbox (green) and optionally the GT bbox (red)."""
         vis = frame.copy()
         if result.consensus_bbox is not None:
             x1, y1, x2, y2 = result.consensus_bbox
@@ -473,18 +461,12 @@ class AutoKeyboardDetector:
             cv2.rectangle(vis, (cx1, cy1), (cx2, cy2), (0, 0, 255), 2)
             cv2.putText(vis, "Corner GT", (cx1, cy2 + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
         if result.iou_vs_corners is not None:
             cv2.putText(vis, f"IoU = {result.iou_vs_corners:.3f}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
         return vis
 
-    def visualize_black_keys(
-        self,
-        frame: np.ndarray,
-        result: AutoDetectionResult,
-    ) -> np.ndarray:
-        """Draw detected black key contours."""
+    def visualize_black_keys(self, frame: np.ndarray, result: AutoDetectionResult) -> np.ndarray:
         vis = frame.copy()
         if result.black_key_contours:
             cv2.drawContours(vis, result.black_key_contours, -1, (0, 255, 255), 2)
@@ -504,17 +486,14 @@ class AutoKeyboardDetector:
         frame_h: int,
     ) -> Optional[Tuple[LineCluster, LineCluster]]:
         """
-        Among all pairs of clusters, select the one most likely to be the
-        keyboard's top and bottom edges.
+        Select the cluster pair most likely to be the keyboard top/bottom.
 
-        Selection criteria:
-            1. aspect ratio within expected range (wide and thin)
-            2. both clusters span a large fraction of the frame
-            3. the ROI between them is BRIGHT (white keys are the brightest
-               horizontal band in a piano video)
-            4. the ROI has high column-wise variance (alternating white/black)
-            5. weighted by mean individual line length (keyboard edges produce
-               long, continuous lines; texture produces many short lines)
+        Scoring considers:
+            - Width fraction (should span most of the frame)
+            - Mean line length (keyboard edges are long; texture is short)
+            - ROI brightness (white keys are the brightest band)
+            - Column-wise variance (alternating white / black)
+            - Aspect-ratio closeness to the ideal (~8 for an 88-key piano)
         """
         best_score = -1.0
         best_pair = None
@@ -532,7 +511,6 @@ class AutoKeyboardDetector:
                 x_min = min(top.x_min, bot.x_min)
                 x_max = max(top.x_max, bot.x_max)
                 width = x_max - x_min
-
                 if width < 100:
                     continue
 
@@ -544,44 +522,33 @@ class AutoKeyboardDetector:
                 if width_frac < self.MIN_WIDTH_FRAC:
                     continue
 
-                # ---- Brightness validation ----
-                # The keyboard region (white keys) is distinctively bright.
-                # Compute mean brightness of the ROI between the two lines.
+                # ---- Brightness of the ROI ----
                 y1 = max(0, int(top.y_mean))
                 y2 = min(frame_h, int(bot.y_mean))
                 x1 = max(0, int(x_min))
                 x2 = min(frame_w, int(x_max))
                 roi = gray[y1:y2, x1:x2]
-
                 if roi.size == 0:
                     continue
 
                 mean_brightness = float(np.mean(roi))
-                # Column-wise std captures alternating white/black pattern
                 col_profile = np.mean(roi, axis=0)
                 col_std = float(np.std(col_profile))
 
-                # White keys have brightness > 150 typically;
-                # use relative brightness compared to frame
                 frame_mean = float(np.mean(gray))
                 brightness_ratio = mean_brightness / max(frame_mean, 1.0)
 
                 # ---- Line quality ----
-                # Prefer clusters with long individual lines (structural edges)
-                # over clusters with many short lines (texture noise)
                 mean_len_top = top.mean_line_length / frame_w
                 mean_len_bot = bot.mean_line_length / frame_w
                 line_quality = (mean_len_top + mean_len_bot) / 2.0
 
                 # ---- Combined score ----
-                # brightness_ratio > 1.5 for keyboard vs background
-                # col_std > 30 for alternating white/black keys
-                # line_quality high for true structural edges
                 score = (
                     width_frac
                     * line_quality
                     * brightness_ratio
-                    * (1.0 + col_std / 100.0)  # bonus for stripe pattern
+                    * (1.0 + col_std / 100.0)
                 )
 
                 if score > best_score:
@@ -590,28 +557,92 @@ class AutoKeyboardDetector:
 
         return best_pair
 
-    def _validate_keyboard_content(
+    # ---- NEW: brightness-profile bottom-edge extension ----
+
+    def _extend_bottom_via_brightness(
         self,
         gray: np.ndarray,
         bbox: Tuple[int, int, int, int],
-    ) -> bool:
+    ) -> Tuple[int, int, int, int]:
         """
-        Check whether the ROI between the selected lines actually looks
-        like a keyboard (bright white keys, high column-wise variance).
+        Extend the bottom edge of the bbox to capture the full white-key region.
+
+        The Hough-based bottom edge frequently lands on the black-key /
+        white-key internal boundary because that is a very high-contrast
+        horizontal edge.  The real bottom of the keyboard is further down,
+        where the white keys end and the player's hands / body / carpet
+        begin.
+
+        Method:
+            1.  Compute the mean row brightness inside the initial bbox
+                (the reference brightness of the keyboard).
+            2.  Scan downward row by row from the current bottom edge.
+            3.  While the mean brightness of each row (in the same x-range)
+                stays above  ``reference * drop_ratio``  we keep extending.
+            4.  A smoothed gradient (Sobel-y) check detects the sharp
+                brightness drop at the keyboard's front edge.
+            5.  Clamp the extension to a maximum of ``width / 5`` pixels
+                (a real keyboard is never deeper than width / 5).
         """
         x1, y1, x2, y2 = bbox
-        roi = gray[max(0, y1):y2, max(0, x1):x2]
-        if roi.size == 0:
-            return False
+        width = x2 - x1
+        height = y2 - y1
+        h_img = gray.shape[0]
 
-        mean_b = float(np.mean(roi))
-        max_b = float(np.max(roi))
-        col_profile = np.mean(roi, axis=0)
-        col_std = float(np.std(col_profile))
+        # Maximum plausible extension (keyboard depth ≈ width / 8,
+        # so the part below the initial detection can be at most ~ width / 5)
+        max_ext = int(width / 5)
+        scan_end = min(y2 + max_ext, h_img)
 
-        # White keys should push mean brightness well above background
-        # and produce high column-wise variation
-        return mean_b > 100 and max_b > 200 and col_std > 15
+        if scan_end <= y2:
+            return bbox
+
+        # Reference brightness: mean of the initial keyboard ROI
+        ref_roi = gray[y1:y2, x1:x2]
+        if ref_roi.size == 0:
+            return bbox
+        ref_brightness = float(np.mean(ref_roi))
+
+        # Scan downward
+        scan_strip = gray[y2:scan_end, x1:x2]
+        if scan_strip.size == 0:
+            return bbox
+
+        row_means = np.mean(scan_strip, axis=1).astype(float)
+
+        # Smooth the profile to avoid single-row noise
+        if len(row_means) > 5:
+            kernel_size = 5
+            row_means_smooth = np.convolve(row_means, np.ones(kernel_size) / kernel_size, mode='same')
+        else:
+            row_means_smooth = row_means
+
+        # The white keys maintain high brightness.  We look for the row
+        # where brightness drops below a fraction of the reference.
+        # Use a generous threshold: white keys can be slightly dimmer at the
+        # front edge (farther from camera, slight shadow).
+        drop_threshold = ref_brightness * 0.55
+
+        new_y2 = y2
+        for i, bval in enumerate(row_means_smooth):
+            if bval < drop_threshold:
+                new_y2 = y2 + i
+                break
+        else:
+            # brightness never dropped → use the scan end
+            new_y2 = scan_end
+
+        # Sanity: the resulting aspect ratio should be plausible
+        new_height = new_y2 - y1
+        if new_height < height:
+            new_y2 = y2  # don't shrink
+        aspect = width / max(new_height, 1)
+        if aspect < self.MIN_ASPECT:
+            # extended too far — clamp
+            new_y2 = y1 + int(width / self.MIN_ASPECT)
+            new_y2 = min(new_y2, h_img)
+
+        return (x1, y1, x2, new_y2)
 
     def _refine_with_black_keys(
         self,
@@ -631,7 +662,6 @@ class AutoKeyboardDetector:
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray_roi, self.black_threshold, 255, cv2.THRESH_BINARY_INV)
 
-        # Morphological clean-up
         kern = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 7))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kern)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kern)
@@ -641,10 +671,9 @@ class AutoKeyboardDetector:
         roi_h = y2 - y1
         roi_w = x2 - x1
 
-        # Expected black key size relative to the ROI
-        min_bk_h = roi_h * 0.25
+        min_bk_h = roi_h * 0.15
         max_bk_h = roi_h * 0.85
-        min_bk_w = roi_w * 0.005
+        min_bk_w = roi_w * 0.003
         max_bk_w = roi_w * 0.04
 
         candidates = []
@@ -657,24 +686,21 @@ class AutoKeyboardDetector:
             aspect = bh / bw if bw > 0 else 0
             if aspect < 1.5:
                 continue
-            # Black keys start near the top of the ROI
-            if by > roi_h * 0.3:
+            if by > roi_h * 0.35:
                 continue
             candidates.append(cnt)
 
         if len(candidates) < 5:
             return None, candidates
 
-        # Tighten bbox using the black key extents
         all_x = []
         for cnt in candidates:
             bx, by, bw, bh = cv2.boundingRect(cnt)
             all_x.extend([bx + x1, bx + bw + x1])
 
-        new_x1 = max(0, min(all_x) - 30)  # small padding
+        new_x1 = max(0, min(all_x) - 30)
         new_x2 = max(all_x) + 30
 
-        # Offset contours to frame coordinates for visualisation
         shifted = [cnt + np.array([[[x1, y1]]]) for cnt in candidates]
         return (new_x1, y1, new_x2, y2), shifted
 
@@ -687,7 +713,6 @@ class AutoKeyboardDetector:
         width = x2 - x1
         height = y2 - y1
 
-        # Build homography  (identity-like from bbox to normalised rect)
         src_pts = np.float32([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
         dst_pts = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
         H = cv2.getPerspectiveTransform(src_pts, dst_pts)

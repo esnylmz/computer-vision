@@ -18,6 +18,7 @@ from .data.video_utils import VideoProcessor
 from .keyboard.detector import KeyboardDetector, KeyboardRegion
 from .keyboard.auto_detector import AutoKeyboardDetector, AutoDetectionResult
 from .hand.skeleton_loader import SkeletonLoader
+from .hand.live_detector import LiveHandDetector, LiveDetectionConfig
 from .hand.temporal_filter import TemporalFilter
 from .hand.fingertip_extractor import FingertipExtractor
 from .assignment.gaussian_assignment import GaussianFingerAssigner, FingerAssignment
@@ -81,21 +82,19 @@ class FingeringPipeline:
     def process_sample(
         self,
         video_path: str,
-        skeleton_data: Dict,
         midi_events: List[Dict],
         keyboard_corners: Optional[Dict] = None
     ) -> List[FingerAssignment]:
         """
         Process a single sample through the full-CV pipeline.
         
-        The keyboard is detected **automatically** from video using
-        Canny/Hough/clustering — no dataset annotations are used in the
-        pipeline itself.  Corner annotations, when provided, are used
+        Both keyboard detection and hand pose estimation run directly
+        on raw video — no dataset annotations or pre-extracted skeletons
+        are used.  Corner annotations, when provided, are used
         **only for IoU evaluation** of the auto-detection quality.
         
         Args:
             video_path: Path to video file
-            skeleton_data: Hand skeleton data
             midi_events: MIDI note events
             keyboard_corners: Optional corner annotations (evaluation only)
             
@@ -135,27 +134,36 @@ class FingeringPipeline:
         key_cx = sorted(self.finger_assigner.key_centers.values(), key=lambda c: c[0])
         self.hand_separator.set_keyboard_center(key_cx[len(key_cx) // 2][0])
         
-        # Stage 2: Hand Processing
-        logger.info("Stage 2: Hand Processing")
-        hands = self.skeleton_loader._parse_json(skeleton_data)
-        
-        left_landmarks = self.skeleton_loader.to_array(hands['left'])
-        right_landmarks = self.skeleton_loader.to_array(hands['right'])
+        # Stage 2: Live Hand Detection (MediaPipe on raw video)
+        logger.info("Stage 2: Live Hand Detection (MediaPipe)")
+        live_cfg = LiveDetectionConfig(
+            model_complexity=1,
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3,
+            frame_stride=2,
+            static_image_mode=False,
+        )
+        live_det = LiveHandDetector(config=live_cfg)
+        left_landmarks, right_landmarks = live_det.detect_from_video(video_path)
         
         if left_landmarks.size > 0:
             left_landmarks = self.temporal_filter.process(left_landmarks)
-            logger.info(f"Left hand: {len(left_landmarks)} frames")
+            logger.info(f"Left hand: {len(left_landmarks)} frames, "
+                        f"detection rate: {LiveHandDetector.detection_rate(left_landmarks):.1%}")
         
         if right_landmarks.size > 0:
             right_landmarks = self.temporal_filter.process(right_landmarks)
-            logger.info(f"Right hand: {len(right_landmarks)} frames")
+            logger.info(f"Right hand: {len(right_landmarks)} frames, "
+                        f"detection rate: {LiveHandDetector.detection_rate(right_landmarks):.1%}")
         
-        # Scale landmarks from [0,1] to pixel space (no homography warp)
+        # Scale landmarks from [0,1] to pixel space
         frame_w, frame_h = 1920, 1080  # PianoVAM resolution
         if left_landmarks.size > 0:
+            left_landmarks = left_landmarks.copy()
             left_landmarks[:, :, 0] *= frame_w
             left_landmarks[:, :, 1] *= frame_h
         if right_landmarks.size > 0:
+            right_landmarks = right_landmarks.copy()
             right_landmarks[:, :, 0] *= frame_w
             right_landmarks[:, :, 1] *= frame_h
         
