@@ -6,7 +6,7 @@ Detects the piano keyboard region from raw video frames using:
     2. Canny edge detection (multiple thresholds, automatic Otsu-based)
     3. Hough line transform — horizontal lines for top/bottom edges
     4. Line clustering (y-coordinate) — merge nearby horizontal lines
-    5. Keyboard ROI selection — pick the widest pair with plausible aspect ratio
+    5. Keyboard ROI selection — brightness-validated pair with best aspect ratio
     6. Black-key segmentation — threshold + contour analysis to refine boundaries
     7. Multi-frame consensus — sample N frames and vote for the best detection
     8. IoU evaluation — compare auto-detected bbox with corner-annotation ground truth
@@ -42,6 +42,25 @@ class LineCluster:
     x_max: float
     count: int
     lines: List[Tuple[int, int, int, int]] = field(default_factory=list)
+
+    @property
+    def width(self) -> float:
+        return self.x_max - self.x_min
+
+    @property
+    def mean_line_length(self) -> float:
+        """Average length of individual lines in this cluster."""
+        if not self.lines:
+            return 0.0
+        lengths = [np.hypot(x2 - x1, y2 - y1) for (x1, y1, x2, y2) in self.lines]
+        return float(np.mean(lengths))
+
+    @property
+    def max_line_length(self) -> float:
+        """Length of the longest individual line in this cluster."""
+        if not self.lines:
+            return 0.0
+        return max(np.hypot(x2 - x1, y2 - y1) for (x1, y1, x2, y2) in self.lines)
 
 
 @dataclass
@@ -136,6 +155,8 @@ class AutoKeyboardDetector:
     This wraps and extends :class:`KeyboardDetector` with:
     * Adaptive preprocessing (CLAHE, Otsu-based Canny)
     * Horizontal-line clustering and intelligent pair selection
+    * Brightness-based content validation (white keys are the brightest
+      horizontal band in the frame)
     * Black-key contour refinement
     * Multi-frame consensus voting
     * IoU comparison against corner-based ground truth
@@ -146,17 +167,17 @@ class AutoKeyboardDetector:
     MIN_ASPECT = 3.0
     MAX_ASPECT = 25.0
     # Minimum width fraction of frame that a valid keyboard should span
-    MIN_WIDTH_FRAC = 0.25
+    MIN_WIDTH_FRAC = 0.30
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         # Canny parameters (will also try automatic Otsu-based)
         self.canny_low = self.config.get("canny_low", 50)
         self.canny_high = self.config.get("canny_high", 150)
-        # Hough parameters
-        self.hough_threshold = self.config.get("hough_threshold", 80)
-        self.min_line_length = self.config.get("min_line_length", 80)
-        self.hough_max_gap = self.config.get("hough_max_gap", 15)
+        # Hough parameters — use long min line length to filter out texture
+        self.hough_threshold = self.config.get("hough_threshold", 100)
+        self.min_line_length = self.config.get("min_line_length", 200)
+        self.hough_max_gap = self.config.get("hough_max_gap", 20)
         # Clustering
         self.y_cluster_tol = self.config.get("y_cluster_tolerance", 15)
         # Multi-frame
@@ -202,18 +223,19 @@ class AutoKeyboardDetector:
         canny_high = min(255, int(otsu_thresh * 1.0))
         edges = cv2.Canny(blurred, canny_low, canny_high)
 
-        # Optional: also try the fixed thresholds and merge
+        # Also try fixed thresholds and merge
         edges_fixed = cv2.Canny(blurred, self.canny_low, self.canny_high)
         edges = cv2.bitwise_or(edges, edges_fixed)
 
-        # Morphological close to connect nearby edge fragments
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
+        # Morphological close with horizontal kernel to connect fragmented
+        # keyboard-edge segments while suppressing vertical noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
         if return_intermediates:
             result.edges = edges.copy()
 
-        # --- 3. Hough Line Transform ---
+        # --- 3. Hough Line Transform (strict parameters) ---
         raw_lines = cv2.HoughLinesP(
             edges, 1, np.pi / 180, self.hough_threshold,
             minLineLength=self.min_line_length,
@@ -246,16 +268,11 @@ class AutoKeyboardDetector:
         if return_intermediates:
             result.line_clusters = clusters
 
-        # Keep only clusters that span a large fraction of the frame width
-        long_clusters = [c for c in clusters if (c.x_max - c.x_min) > w * self.MIN_WIDTH_FRAC]
-        if len(long_clusters) < 2:
-            long_clusters = clusters  # fallback to all
-
-        if len(long_clusters) < 2:
+        if len(clusters) < 2:
             return result
 
-        # --- 5. Select top/bottom pair ---
-        best_pair = self._select_keyboard_pair(long_clusters, w, h)
+        # --- 5. Select top/bottom pair (brightness-validated) ---
+        best_pair = self._select_keyboard_pair(clusters, gray, w, h)
         if best_pair is None:
             return result
 
@@ -265,7 +282,7 @@ class AutoKeyboardDetector:
         y_top = int(top_cluster.y_mean)
         y_bot = int(bot_cluster.y_mean)
 
-        # Sanity
+        # Sanity checks
         if y_bot - y_top < 20 or x_max - x_min < 100:
             return result
 
@@ -482,15 +499,22 @@ class AutoKeyboardDetector:
     def _select_keyboard_pair(
         self,
         clusters: List[LineCluster],
+        gray: np.ndarray,
         frame_w: int,
         frame_h: int,
     ) -> Optional[Tuple[LineCluster, LineCluster]]:
         """
         Among all pairs of clusters, select the one most likely to be the
-        keyboard's top and bottom edges.  Selection criteria:
-            - height / width aspect ratio within expected range
-            - both clusters span a large fraction of the frame
-            - the pair maximises (width × evidence) where evidence = sum of counts
+        keyboard's top and bottom edges.
+
+        Selection criteria:
+            1. aspect ratio within expected range (wide and thin)
+            2. both clusters span a large fraction of the frame
+            3. the ROI between them is BRIGHT (white keys are the brightest
+               horizontal band in a piano video)
+            4. the ROI has high column-wise variance (alternating white/black)
+            5. weighted by mean individual line length (keyboard edges produce
+               long, continuous lines; texture produces many short lines)
         """
         best_score = -1.0
         best_pair = None
@@ -502,7 +526,7 @@ class AutoKeyboardDetector:
                     top, bot = bot, top
 
                 height = bot.y_mean - top.y_mean
-                if height < 15:
+                if height < 30:
                     continue
 
                 x_min = min(top.x_min, bot.x_min)
@@ -517,14 +541,77 @@ class AutoKeyboardDetector:
                     continue
 
                 width_frac = width / frame_w
-                evidence = top.count + bot.count
-                score = width_frac * evidence
+                if width_frac < self.MIN_WIDTH_FRAC:
+                    continue
+
+                # ---- Brightness validation ----
+                # The keyboard region (white keys) is distinctively bright.
+                # Compute mean brightness of the ROI between the two lines.
+                y1 = max(0, int(top.y_mean))
+                y2 = min(frame_h, int(bot.y_mean))
+                x1 = max(0, int(x_min))
+                x2 = min(frame_w, int(x_max))
+                roi = gray[y1:y2, x1:x2]
+
+                if roi.size == 0:
+                    continue
+
+                mean_brightness = float(np.mean(roi))
+                # Column-wise std captures alternating white/black pattern
+                col_profile = np.mean(roi, axis=0)
+                col_std = float(np.std(col_profile))
+
+                # White keys have brightness > 150 typically;
+                # use relative brightness compared to frame
+                frame_mean = float(np.mean(gray))
+                brightness_ratio = mean_brightness / max(frame_mean, 1.0)
+
+                # ---- Line quality ----
+                # Prefer clusters with long individual lines (structural edges)
+                # over clusters with many short lines (texture noise)
+                mean_len_top = top.mean_line_length / frame_w
+                mean_len_bot = bot.mean_line_length / frame_w
+                line_quality = (mean_len_top + mean_len_bot) / 2.0
+
+                # ---- Combined score ----
+                # brightness_ratio > 1.5 for keyboard vs background
+                # col_std > 30 for alternating white/black keys
+                # line_quality high for true structural edges
+                score = (
+                    width_frac
+                    * line_quality
+                    * brightness_ratio
+                    * (1.0 + col_std / 100.0)  # bonus for stripe pattern
+                )
 
                 if score > best_score:
                     best_score = score
                     best_pair = (top, bot)
 
         return best_pair
+
+    def _validate_keyboard_content(
+        self,
+        gray: np.ndarray,
+        bbox: Tuple[int, int, int, int],
+    ) -> bool:
+        """
+        Check whether the ROI between the selected lines actually looks
+        like a keyboard (bright white keys, high column-wise variance).
+        """
+        x1, y1, x2, y2 = bbox
+        roi = gray[max(0, y1):y2, max(0, x1):x2]
+        if roi.size == 0:
+            return False
+
+        mean_b = float(np.mean(roi))
+        max_b = float(np.max(roi))
+        col_profile = np.mean(roi, axis=0)
+        col_std = float(np.std(col_profile))
+
+        # White keys should push mean brightness well above background
+        # and produce high column-wise variation
+        return mean_b > 100 and max_b > 200 and col_std > 15
 
     def _refine_with_black_keys(
         self,
