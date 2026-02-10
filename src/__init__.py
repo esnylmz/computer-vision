@@ -4,7 +4,7 @@ Piano Fingering Detection Package
 A computer vision system for automatic piano fingering detection from video.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Your Name"
 
 from . import data
