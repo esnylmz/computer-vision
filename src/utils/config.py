@@ -65,7 +65,7 @@ class RefinementConfig:
 class Config:
     """Main configuration container."""
     project_name: str = "piano-fingering-detection"
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     
     # Data settings
     dataset_name: str = "PianoVAM/PianoVAM_v1.0"
