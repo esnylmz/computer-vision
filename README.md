@@ -7,6 +7,9 @@
 
 A **full computer-vision system** that automatically detects piano fingering (which finger plays each note) from video recordings. The pipeline uses **no manual annotations** during detection — only classical CV and learned models. Developed as a Computer Vision final project at Sapienza University of Rome.
 
+- Anastasia Deniz Durak - 2238351 - durak.2238351@studenti.uniroma1.it
+- Emine Esin Yılmaz - 2252231 - yilmaz.2252231@studenti.uniroma1.it
+
 **Input**: Video + MIDI &rarr; **Output**: Per-note finger labels (L1–L5 for left hand, R1–R5 for right hand)
 
 ---
