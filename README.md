@@ -38,7 +38,9 @@ We **did not** use the paper's most distinctive components (fine-tuned Faster R-
 3. **Temporal filtering pipeline** — 3-stage Hampel → interpolation → Savitzky-Golay filter (not present in the paper at all).
 4. **Neural refinement with BiLSTM + Attention + Constrained Viterbi decoding** — the paper has no neural refinement. We added biomechanical constraints (max stretch, finger ordering, thumb crossing) enforced via Viterbi.
 5. **Zero-annotation detection** — the entire detection pipeline operates on raw video; PianoVAM corner annotations are used **only** for IoU evaluation.
-6. **Comprehensive evaluation framework** — Keyboard IoU, IFR (Irrational Fingering Rate), and a ready-to-use Accuracy/M_gen/M_high framework for when ground-truth finger labels become available.
+6. **Viterbi-only refinement** — a lightweight, training-free alternative that applies constrained Viterbi decoding directly on Gaussian emission probabilities, achieving the best accuracy-IFR trade-off.
+7. **Visual Reference Ground Truth** — surrogate finger-level evaluation using dataset skeletons + 2D Euclidean distance, enabling quantitative accuracy/F1 metrics without human annotation.
+8. **Comprehensive evaluation framework** — Keyboard IoU, IFR, Visual GT accuracy/F1, and a ready-to-use Accuracy/M_gen/M_high framework for when expert finger labels become available.
 
 > See [`docs/CONTRIBUTIONS.md`](docs/CONTRIBUTIONS.md) for a detailed comparison table and a ready-made answer for "What is your contribution?"
 
@@ -57,7 +59,8 @@ Video ──► Keyboard Detection ──► Hand Processing ──► Finger-Ke
 | 1. Keyboard Detection | Canny + Hough + Clustering + Black-Key Analysis | Video frames | 88 key bounding boxes (pixel space) |
 | 2. Hand Processing | MediaPipe (live) + Hampel + SavGol filters | Raw video frames | Filtered landmarks (T × 21 × 3) |
 | 3. Finger Assignment | Gaussian probability (x-only, Moryossef et al.) | MIDI events + fingertips + keys | FingerAssignment per note |
-| 4. Neural Refinement | BiLSTM + Attention + Viterbi | Initial assignments | Refined predictions |
+| 4a. Viterbi-Only | Constrained Viterbi on Gaussian probs | Initial assignments | Refined predictions (recommended) |
+| 4b. BiLSTM + Viterbi | BiLSTM + Attention + Viterbi | Initial assignments | Refined predictions |
 
 ### Stage 1 — Automatic Keyboard Detection
 
@@ -88,9 +91,13 @@ Runs **MediaPipe Hands** directly on raw video (video mode, `model_complexity=1`
 
 For each MIDI note event, computes Gaussian probability over all five fingertips using **x-distance only**: `P(finger_i → key_k) = exp(−dx²/2σ²)`. Both hands are evaluated; the higher-confidence assignment wins. A 4σ max-distance gate rejects far-away hands.
 
-### Stage 4 — Neural Refinement
+### Stage 4 — Refinement
 
-BiLSTM (128-dim, 2 layers) with 4-head self-attention refines baseline predictions. Constrained Viterbi decoding enforces biomechanical constraints (max stretch, finger ordering, thumb crossing).
+Two refinement strategies are available:
+
+1. **Viterbi-only** (recommended) — Constrained Viterbi decoding directly on the Gaussian emission probabilities. No neural network required. Enforces biomechanical constraints (max stretch, finger ordering, thumb crossing) while preserving the strong positional signal from Stage 3. Best accuracy-IFR trade-off.
+
+2. **BiLSTM + Viterbi** — BiLSTM (128-dim, 2 layers) with 4-head self-attention refines baseline predictions, followed by Constrained Viterbi decoding. Achieves lowest IFR but may reduce finger accuracy due to self-supervised training (no ground-truth labels).
 
 ---
 
@@ -116,7 +123,7 @@ BiLSTM (128-dim, 2 layers) with 4-head self-attention refines baseline predictio
 | **Accuracy** | Exact match with ground-truth finger labels | Yes |
 | **M_gen / M_high** | General / highest match rate across annotators | Yes |
 
-> IFR and Keyboard IoU are evaluated end-to-end. Accuracy/M_gen/M_high are implemented but require per-note finger annotations not provided by PianoVAM.
+> IFR and Keyboard IoU are evaluated end-to-end. Additionally, a **Visual Reference Ground Truth** constructed from PianoVAM's pre-extracted skeletons + 2D Euclidean distance provides surrogate finger-level accuracy (~70% on test set). Accuracy/M_gen/M_high are also implemented for when human expert annotations become available.
 
 ---
 
@@ -177,8 +184,9 @@ pip install -e .
 
 ## Known Limitations
 
-- **Self-supervised refinement**: The BiLSTM trains on the Gaussian baseline's own outputs (no ground-truth finger labels available in PianoVAM).
+- **Self-supervised BiLSTM refinement**: The BiLSTM trains on the Gaussian baseline's own outputs (no ground-truth finger labels in PianoVAM). The Viterbi-only refinement avoids this limitation entirely.
 - **Limited training scale**: 5 samples × 60 s each (class-project constraint); more data would improve neural refinement.
+- **Surrogate ground truth**: Visual proximity GT is an approximation — not expert annotation. In fast polyphonic passages, closest-fingertip may not equal playing-finger.
 - **Offline processing**: The system operates on pre-recorded video; real-time adaptation is future work.
 
 ---
