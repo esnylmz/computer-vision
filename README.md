@@ -14,7 +14,9 @@ A **full computer-vision system** that automatically detects piano fingering (wh
 - Anastasia Deniz Durak - 2238351 - durak.2238351@studenti.uniroma1.it
 - Emine Esin Yılmaz - 2252231 - yilmaz.2252231@studenti.uniroma1.it
 
-**Presentation Powerpoint Link**: [Project Presentation (PPTX)](https://github.com/esnylmz/computer-vision/blob/main/presentation_2252231_2238351.pptx)
+**Presentation Powerpoint Link**: [Project Presentation (PPTX)](https://github.com/esnylmz/computer-vision/blob/main/presentation_2252231_2238351.pptx) &
+ **Main Notebook**: [Main Notebook – Piano Fingering Detection](https://github.com/esnylmz/computer-vision/blob/main/notebooks/main_code_piano_fingering_detection.ipynb)
+
 
 **Computer Vision Final Project — Sapienza University of Rome**
 
